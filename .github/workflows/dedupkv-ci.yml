@@ -33,7 +33,7 @@ jobs:
 
       - name: Build DedupKV test binaries
         run: |
-          make \
+          make DEBUG_LEVEL=0 LIB_MODE=static \
             sha1_test \
             uvl_log_format_test \
             uvl_file_builder_test \
