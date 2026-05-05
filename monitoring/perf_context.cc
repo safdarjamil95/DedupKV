@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "monitoring/perf_context_imp.h"
+#include "util/thread_local.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -174,7 +175,13 @@ struct PerfContextInt {
 // Put here just to make get_perf_context() simple without ifdef.
 PerfContext perf_context;
 #else
-thread_local PerfContext perf_context;
+namespace {
+
+void UnrefPerfContext(void* ptr) { delete static_cast<PerfContext*>(ptr); }
+
+ThreadLocalPtr perf_context_holder(&UnrefPerfContext);
+
+}  // namespace
 #endif
 
 PerfContext* get_perf_context() {
@@ -199,7 +206,16 @@ PerfContext* get_perf_context() {
                 offsetof(PerfContextByLevelInt, x));
   DEF_PERF_CONTEXT_LEVEL_METRICS(EMIT_OFFSET_ASSERTION)
 #undef EMIT_OFFSET_ASSERTION
+#if defined(NPERF_CONTEXT)
   return &perf_context;
+#else
+  auto* ctx = static_cast<PerfContext*>(perf_context_holder.Get());
+  if (ctx == nullptr) {
+    ctx = new PerfContext();
+    perf_context_holder.Reset(ctx);
+  }
+  return ctx;
+#endif
 }
 
 PerfContext::~PerfContext() {

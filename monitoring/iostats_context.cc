@@ -7,6 +7,7 @@
 
 #include "monitoring/iostats_context_imp.h"
 #include "rocksdb/env.h"
+#include "util/thread_local.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -15,10 +16,30 @@ namespace ROCKSDB_NAMESPACE {
 // Put here just to make get_iostats_context() simple without ifdef.
 static IOStatsContext iostats_context;
 #else
-thread_local IOStatsContext iostats_context;
+namespace {
+
+void UnrefIOStatsContext(void* ptr) {
+  delete static_cast<IOStatsContext*>(ptr);
+}
+
+ThreadLocalPtr iostats_context_holder(&UnrefIOStatsContext);
+
+}  // namespace
 #endif
 
-IOStatsContext* get_iostats_context() { return &iostats_context; }
+IOStatsContext* get_iostats_context() {
+#ifdef NIOSTATS_CONTEXT
+  return &iostats_context;
+#else
+  auto* ctx = static_cast<IOStatsContext*>(iostats_context_holder.Get());
+  if (ctx == nullptr) {
+    ctx = new IOStatsContext();
+    ctx->Reset();
+    iostats_context_holder.Reset(ctx);
+  }
+  return ctx;
+#endif
+}
 
 void IOStatsContext::Reset() {
 #ifndef NIOSTATS_CONTEXT

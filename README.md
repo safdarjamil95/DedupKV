@@ -9,6 +9,9 @@ DedupKV preserves RocksDB's public API shape and storage-engine foundation,
 while adding a Unique Value Log (UVL), content-index metadata, duplicate
 detection, offline drain support, and UVL garbage collection.
 
+Manuscript:
+https://dl.acm.org/doi/10.1145/3721145.3730424
+
 ## Highlights
 
 - Inline, offline, and elastic deduplication modes.
@@ -134,8 +137,6 @@ The dataset format is tab-separated `key<TAB>value` pairs.
 ## Documentation
 
 See `docs/dedupkv.md` for a concise design overview and verification notes.
-The DedupKV manuscript is available at:
-https://dl.acm.org/doi/10.1145/3721145.3730424
 
 ## Current Status
 

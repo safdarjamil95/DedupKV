@@ -8,42 +8,42 @@
 #include "rocksdb/iostats_context.h"
 
 #if !defined(NIOSTATS_CONTEXT)
-namespace ROCKSDB_NAMESPACE {
-extern thread_local IOStatsContext iostats_context;
-}  // namespace ROCKSDB_NAMESPACE
-
 // increment a specific counter by the specified value
-#define IOSTATS_ADD(metric, value)        \
-  if (!iostats_context.disable_iostats) { \
-    iostats_context.metric += value;      \
+#define IOSTATS_ADD(metric, value)                  \
+  if (!::ROCKSDB_NAMESPACE::get_iostats_context()   \
+           ->disable_iostats) {                     \
+    ::ROCKSDB_NAMESPACE::get_iostats_context()      \
+        ->metric += value;                          \
   }
 
 // reset a specific counter to zero
-#define IOSTATS_RESET(metric) (iostats_context.metric = 0)
+#define IOSTATS_RESET(metric) (::ROCKSDB_NAMESPACE::get_iostats_context()->metric = 0)
 
 // reset all counters to zero
-#define IOSTATS_RESET_ALL() (iostats_context.Reset())
+#define IOSTATS_RESET_ALL() (::ROCKSDB_NAMESPACE::get_iostats_context()->Reset())
 
 #define IOSTATS_SET_THREAD_POOL_ID(value) \
-  (iostats_context.thread_pool_id = value)
+  (::ROCKSDB_NAMESPACE::get_iostats_context()->thread_pool_id = value)
 
-#define IOSTATS_THREAD_POOL_ID() (iostats_context.thread_pool_id)
+#define IOSTATS_THREAD_POOL_ID() (::ROCKSDB_NAMESPACE::get_iostats_context()->thread_pool_id)
 
-#define IOSTATS(metric) (iostats_context.metric)
+#define IOSTATS(metric) (::ROCKSDB_NAMESPACE::get_iostats_context()->metric)
 
 // Declare and set start time of the timer
-#define IOSTATS_TIMER_GUARD(metric)                                     \
-  PerfStepTimer iostats_step_timer_##metric(&(iostats_context.metric)); \
+#define IOSTATS_TIMER_GUARD(metric)                                           \
+  PerfStepTimer iostats_step_timer_##metric(                                  \
+      &(::ROCKSDB_NAMESPACE::get_iostats_context()->metric));                 \
   iostats_step_timer_##metric.Start();
 
 // Declare and set start time of the timer
-#define IOSTATS_CPU_TIMER_GUARD(metric, clock)         \
-  PerfStepTimer iostats_step_timer_##metric(           \
-      &(iostats_context.metric), clock, true,          \
+#define IOSTATS_CPU_TIMER_GUARD(metric, clock)                                 \
+  PerfStepTimer iostats_step_timer_##metric(                                   \
+      &(::ROCKSDB_NAMESPACE::get_iostats_context()->metric), clock, true,      \
       PerfLevel::kEnableTimeAndCPUTimeExceptForMutex); \
   iostats_step_timer_##metric.Start();
 
-#define IOSTATS_SET_DISABLE(disable) (iostats_context.disable_iostats = disable)
+#define IOSTATS_SET_DISABLE(disable) \
+  (::ROCKSDB_NAMESPACE::get_iostats_context()->disable_iostats = disable)
 
 #else  // !NIOSTATS_CONTEXT
 

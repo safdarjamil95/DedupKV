@@ -5,19 +5,38 @@
 //
 
 #include <cassert>
+#include <cstdint>
 
 #include "monitoring/perf_level_imp.h"
+#include "util/thread_local.h"
 
 namespace ROCKSDB_NAMESPACE {
 
-thread_local PerfLevel perf_level = kEnableCount;
+namespace {
+
+ThreadLocalPtr perf_level_holder;
+
+void SetPerfLevelValue(PerfLevel level) {
+  perf_level_holder.Reset(reinterpret_cast<void*>(
+      static_cast<uintptr_t>(level) + static_cast<uintptr_t>(1)));
+}
+
+PerfLevel GetPerfLevelValue() {
+  auto raw = reinterpret_cast<uintptr_t>(perf_level_holder.Get());
+  if (raw == 0) {
+    return kEnableCount;
+  }
+  return static_cast<PerfLevel>(raw - 1);
+}
+
+}  // namespace
 
 void SetPerfLevel(PerfLevel level) {
   assert(level > kUninitialized);
   assert(level < kOutOfBounds);
-  perf_level = level;
+  SetPerfLevelValue(level);
 }
 
-PerfLevel GetPerfLevel() { return perf_level; }
+PerfLevel GetPerfLevel() { return GetPerfLevelValue(); }
 
 }  // namespace ROCKSDB_NAMESPACE

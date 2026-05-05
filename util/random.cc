@@ -13,22 +13,24 @@
 #include <utility>
 
 #include "port/likely.h"
-#include "util/aligned_storage.h"
 #include "util/thread_local.h"
-
-#define STORAGE_DECL static thread_local
 
 namespace ROCKSDB_NAMESPACE {
 
-Random* Random::GetTLSInstance() {
-  STORAGE_DECL Random* tls_instance;
-  STORAGE_DECL aligned_storage<Random>::type tls_instance_bytes;
+namespace {
 
-  auto rv = tls_instance;
+void UnrefRandom(void* ptr) { delete static_cast<Random*>(ptr); }
+
+ThreadLocalPtr random_holder(&UnrefRandom);
+
+}  // namespace
+
+Random* Random::GetTLSInstance() {
+  auto* rv = static_cast<Random*>(random_holder.Get());
   if (UNLIKELY(rv == nullptr)) {
     size_t seed = std::hash<std::thread::id>()(std::this_thread::get_id());
-    rv = new (&tls_instance_bytes) Random((uint32_t)seed);
-    tls_instance = rv;
+    rv = new Random((uint32_t)seed);
+    random_holder.Reset(rv);
   }
   return rv;
 }
