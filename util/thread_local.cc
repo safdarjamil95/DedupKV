@@ -139,15 +139,10 @@ class ThreadLocalPtr::StaticMeta {
   // The private mutex.  Developers should always use Mutex() instead of
   // using this variable directly.
   port::Mutex mutex_;
-  // Thread local storage
-  static thread_local ThreadData* tls_;
-
   // Used to make thread exit trigger possible if !defined(OS_MACOSX).
   // Otherwise, used to retrieve thread data.
   pthread_key_t pthread_key_;
 };
-
-thread_local ThreadData* ThreadLocalPtr::StaticMeta::tls_ = nullptr;
 
 // Windows doesn't support a per-thread destructor with its
 // TLS primitives.  So, we build it manually by inserting a
@@ -257,10 +252,6 @@ ThreadLocalPtr::StaticMeta* ThreadLocalPtr::Instance() {
   // the following variable will go first, then OnThreadExit, therefore causing
   // invalid access.
   //
-  // The above problem can be solved by using thread_local to store tls_.
-  // thread_local supports dynamic construction and destruction of
-  // non-primitive typed variables.  As a result, we can guarantee the
-  // destruction order even when the main thread dies before any child threads.
   static ThreadLocalPtr::StaticMeta* inst = new ThreadLocalPtr::StaticMeta();
   return inst;
 }
@@ -317,8 +308,11 @@ ThreadLocalPtr::StaticMeta::StaticMeta()
 #if !defined(OS_WIN)
   static struct A {
     ~A() {
-      if (tls_) {
-        OnThreadExit(tls_);
+      auto* inst = ThreadLocalPtr::Instance();
+      auto* tls =
+          static_cast<ThreadData*>(pthread_getspecific(inst->pthread_key_));
+      if (tls != nullptr) {
+        OnThreadExit(tls);
       }
     }
   } a;
@@ -350,27 +344,28 @@ void ThreadLocalPtr::StaticMeta::RemoveThreadData(ThreadData* d) {
 }
 
 ThreadData* ThreadLocalPtr::StaticMeta::GetThreadLocal() {
-  if (UNLIKELY(tls_ == nullptr)) {
-    auto* inst = Instance();
-    tls_ = new ThreadData(inst);
+  auto* inst = Instance();
+  auto* tls = static_cast<ThreadData*>(pthread_getspecific(inst->pthread_key_));
+  if (UNLIKELY(tls == nullptr)) {
+    tls = new ThreadData(inst);
     {
       // Register it in the global chain, needs to be done before thread exit
       // handler registration
       MutexLock l(Mutex());
-      inst->AddThreadData(tls_);
+      inst->AddThreadData(tls);
     }
     // Even it is not OS_MACOSX, need to register value for pthread_key_ so that
     // its exit handler will be triggered.
-    if (pthread_setspecific(inst->pthread_key_, tls_) != 0) {
+    if (pthread_setspecific(inst->pthread_key_, tls) != 0) {
       {
         MutexLock l(Mutex());
-        inst->RemoveThreadData(tls_);
+        inst->RemoveThreadData(tls);
       }
-      delete tls_;
+      delete tls;
       abort();
     }
   }
-  return tls_;
+  return tls;
 }
 
 void* ThreadLocalPtr::StaticMeta::Get(uint32_t id) const {
