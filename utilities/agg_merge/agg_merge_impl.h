@@ -18,6 +18,7 @@ namespace ROCKSDB_NAMESPACE {
 class AggMergeOperator : public MergeOperator {
  public:
   explicit AggMergeOperator();
+  static void DeleteTLSAccumulator(void* ptr);
 
   bool FullMergeV2(const MergeOperationInput& merge_in,
                    MergeOperationOutput* merge_out) const override;
@@ -41,7 +42,6 @@ class AggMergeOperator : public MergeOperator {
   // debug the problem.
   static void PackAllMergeOperands(const MergeOperationInput& merge_in,
                                    MergeOperationOutput& merge_out);
-  static void DeleteTLSAccumulator(void* ptr);
   static Accumulator& GetTLSAccumulator();
 };
 
