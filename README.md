@@ -134,6 +134,8 @@ The dataset format is tab-separated `key<TAB>value` pairs.
 ## Documentation
 
 See `docs/dedupkv.md` for a concise design overview and verification notes.
+The DedupKV manuscript is available at:
+https://dl.acm.org/doi/10.1145/3721145.3730424
 
 ## Current Status
 

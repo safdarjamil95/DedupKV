@@ -16,7 +16,7 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-thread_local size_t ConcurrentArena::tls_cpuid = 0;
+ThreadLocalPtr ConcurrentArena::tls_cpuid_;
 
 namespace {
 // If the shard block size is too large, in the worst case, every core
@@ -38,7 +38,7 @@ ConcurrentArena::Shard* ConcurrentArena::Repick() {
   auto shard_and_index = shards_.AccessElementAndIndex();
   // even if we are cpu 0, use a non-zero tls_cpuid so we can tell we
   // have repicked
-  tls_cpuid = shard_and_index.second | shards_.Size();
+  SetTlsCpuId(shard_and_index.second | shards_.Size());
   return shard_and_index.first;
 }
 

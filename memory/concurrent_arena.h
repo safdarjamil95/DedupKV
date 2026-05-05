@@ -9,6 +9,7 @@
 
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -98,7 +99,7 @@ class ConcurrentArena : public Allocator {
     Shard() : free_begin_(nullptr), allocated_and_unused_(0) {}
   };
 
-  static thread_local size_t tls_cpuid;
+  static ThreadLocalPtr tls_cpuid_;
 
   char padding0[56] ROCKSDB_FIELD_UNUSED;
 
@@ -115,6 +116,16 @@ class ConcurrentArena : public Allocator {
   char padding1[56] ROCKSDB_FIELD_UNUSED;
 
   Shard* Repick();
+
+  static size_t GetTlsCpuId() {
+    return static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(tls_cpuid_.Get()));
+  }
+
+  static void SetTlsCpuId(size_t cpu) {
+    assert(cpu != 0);
+    tls_cpuid_.Reset(reinterpret_cast<void*>(static_cast<uintptr_t>(cpu)));
+  }
 
   size_t ShardAllocatedAndUnused() const {
     size_t total = 0;
@@ -135,7 +146,7 @@ class ConcurrentArena : public Allocator {
     // concurrency zero unless it might actually confer an advantage.
     std::unique_lock<SpinMutex> arena_lock(arena_mutex_, std::defer_lock);
     if (bytes > shard_block_size_ / 4 || force_arena ||
-        ((cpu = tls_cpuid) == 0 &&
+        ((cpu = GetTlsCpuId()) == 0 &&
          !shards_.AccessAtCore(0)->allocated_and_unused_.load(
              std::memory_order_relaxed) &&
          arena_lock.try_lock())) {
