@@ -41,6 +41,7 @@ class AggMergeOperator : public MergeOperator {
   // debug the problem.
   static void PackAllMergeOperands(const MergeOperationInput& merge_in,
                                    MergeOperationOutput& merge_out);
+  static void DeleteTLSAccumulator(void* ptr);
   static Accumulator& GetTLSAccumulator();
 };
 

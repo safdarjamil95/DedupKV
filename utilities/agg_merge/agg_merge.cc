@@ -18,6 +18,7 @@
 #include "rocksdb/slice.h"
 #include "rocksdb/utilities/options_type.h"
 #include "util/coding.h"
+#include "util/thread_local.h"
 #include "utilities/agg_merge/agg_merge_impl.h"
 #include "utilities/merge_operators.h"
 
@@ -169,10 +170,24 @@ class AggMergeOperator::Accumulator {
 // AggMergeOperator's merge operators can be invoked concurrently by multiple
 // threads so we cannot simply create one Aggregator and reuse.
 // We use thread local instances instead.
+namespace {
+ThreadLocalPtr agg_merge_accumulator_holder(
+    &AggMergeOperator::DeleteTLSAccumulator);
+
+}  // namespace
+
+void AggMergeOperator::DeleteTLSAccumulator(void* ptr) {
+  delete static_cast<Accumulator*>(ptr);
+}
+
 AggMergeOperator::Accumulator& AggMergeOperator::GetTLSAccumulator() {
-  static thread_local Accumulator tls_acc;
-  tls_acc.Clear();
-  return tls_acc;
+  auto* tls_acc = static_cast<Accumulator*>(agg_merge_accumulator_holder.Get());
+  if (tls_acc == nullptr) {
+    tls_acc = new Accumulator();
+    agg_merge_accumulator_holder.Reset(tls_acc);
+  }
+  tls_acc->Clear();
+  return *tls_acc;
 }
 
 void AggMergeOperator::PackAllMergeOperands(const MergeOperationInput& merge_in,
