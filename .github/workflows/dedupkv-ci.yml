@@ -29,11 +29,11 @@ jobs:
             libzstd-dev
 
       - name: Build static library and DedupKV driver
-        run: make static_lib dedupkv_driver -j"$(nproc)"
+        run: make DEBUG_LEVEL=1 LIB_MODE=static static_lib dedupkv_driver -j"$(nproc)"
 
       - name: Build DedupKV test binaries
         run: |
-          make DEBUG_LEVEL=0 LIB_MODE=static \
+          make DEBUG_LEVEL=1 LIB_MODE=static \
             sha1_test \
             uvl_log_format_test \
             uvl_file_builder_test \
