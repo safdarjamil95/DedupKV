@@ -21,9 +21,10 @@ inline bool should_sample_file_read() {
 
 inline bool should_sample_file_read_next() {
   // Decrease probability of sampling next() to discount it as it is cheaper
-  // than seek()
-  thread_local uint32_t counter = 0;
-  bool result = (++counter & (kFileReadNextSampleRate - 1)) == 0;
+  // than seek(). Avoid a function-local `thread_local` counter here because
+  // it can force a non-PIC TLS relocation in shared-library builds.
+  bool result =
+      (Random::GetTLSInstance()->Next() & (kFileReadNextSampleRate - 1)) == 0;
   TEST_SYNC_POINT_CALLBACK("should_sample_file_read:override", &result);
   return result;
 }
