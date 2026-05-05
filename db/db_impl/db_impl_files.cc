@@ -11,6 +11,8 @@
 #include <unordered_set>
 
 #include "db/db_impl/db_impl.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/dedup_work_queue.h"
 #include "db/event_helpers.h"
 #include "db/memtable_list.h"
 #include "file/file_util.h"
@@ -25,7 +27,22 @@
 namespace ROCKSDB_NAMESPACE {
 
 uint64_t DBImpl::MinLogNumberToKeep() {
-  return versions_->min_log_number_to_keep();
+  uint64_t n = versions_->min_log_number_to_keep();
+  // ITEM-09c: pin WALs referenced by live DWQEntries so the offline
+  // worker can still drain them after the flush that scheduled them.
+  // `dedup_contexts_` is mutated only at DB Open/Close under mutex_,
+  // so reading it is safe as long as mutex_ is held by the caller of
+  // FindObsoleteFiles (which it is).
+  for (const auto& kv : dedup_contexts_) {
+    const auto& ctx = kv.second;
+    if (ctx && ctx->dwq) {
+      const uint64_t earliest = ctx->dwq->EarliestWalNumber();
+      if (earliest != 0 && (n == 0 || earliest < n)) {
+        n = earliest;
+      }
+    }
+  }
+  return n;
 }
 
 uint64_t DBImpl::MinLogNumberToRecycle() { return min_wal_number_to_recycle_; }
@@ -593,6 +610,13 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
         if (!keep) {
           files_to_del.insert(number);
         }
+        break;
+      case kUvlFile:
+        // DedupKV UVL files: no live-set plumbing yet (introduced in
+        // ITEM-02; ITEM-14/18 will thread the live set through MANIFEST
+        // and GC). Until then, unconditionally retain so we never drop
+        // values that the LSM still points at.
+        keep = true;
         break;
       case kTempFile:
         // Any temp files that are currently being written to must

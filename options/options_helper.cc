@@ -315,6 +315,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
       moptions.memtable_op_scan_flush_trigger;
   cf_opts->memtable_avg_op_scan_flush_trigger =
       moptions.memtable_avg_op_scan_flush_trigger;
+
+  cf_opts->dedupkv = moptions.dedupkv;
 }
 
 void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
@@ -983,6 +985,12 @@ std::unordered_map<std::string, PrepopulateBlobCache>
     OptionsHelper::prepopulate_blob_cache_string_map = {
         {"kDisable", PrepopulateBlobCache::kDisable},
         {"kFlushOnly", PrepopulateBlobCache::kFlushOnly}};
+
+std::unordered_map<std::string, DedupMode>
+    OptionsHelper::dedup_mode_string_map = {
+        {"kInlineOnly", DedupMode::kInlineOnly},
+        {"kOfflineOnly", DedupMode::kOfflineOnly},
+        {"kElastic", DedupMode::kElastic}};
 
 Status OptionTypeInfo::NextToken(const std::string& opts, char delimiter,
                                  size_t pos, size_t* end, std::string* token) {

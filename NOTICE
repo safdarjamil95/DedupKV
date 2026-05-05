@@ -1,0 +1,17 @@
+DedupKV Notice
+
+DedupKV is derived from RocksDB.
+
+RocksDB is developed and maintained by Meta/Facebook Database Engineering and
+is built on earlier work from LevelDB by Sanjay Ghemawat and Jeff Dean.
+
+Original RocksDB source:
+https://github.com/facebook/rocksdb
+
+This repository retains RocksDB's original copyright notices, source headers,
+and license files. RocksDB is dual-licensed under GPLv2 and Apache License 2.0,
+at the user's option. See COPYING and LICENSE.Apache.
+
+DedupKV-specific modifications add UVL-backed value deduplication, CIT/DGD/DWQ
+metadata and execution paths, UVL garbage collection, statistics, event hooks,
+and evaluation tooling.

@@ -36,6 +36,7 @@ class TableCache;
 class TableBuilder;
 class WritableFileWriter;
 class BlobFileCompletionCallback;
+class DedupFlushAdapter;
 
 // Convenience function for NewTableBuilder on the embedded table_factory.
 TableBuilder* NewTableBuilder(const TableBuilderOptions& tboptions,
@@ -79,6 +80,12 @@ Status BuildTable(
     BlobFileCompletionCallback* blob_callback = nullptr,
     Version* version = nullptr, uint64_t* memtable_payload_bytes = nullptr,
     uint64_t* memtable_garbage_bytes = nullptr,
-    InternalStats::CompactionStats* flush_stats = nullptr);
+    InternalStats::CompactionStats* flush_stats = nullptr,
+    // ITEM-14c: when non-null, each kTypeValue flushed is routed through
+    // the DedupKV adapter (DGD + UVL append) and the SST entry is emitted
+    // with ValueType kTypeBlobIndex pointing into the UVL. Caller owns
+    // the adapter's UVL file and is responsible for installing it in the
+    // VersionEdit (or deleting it on failure) after BuildTable returns.
+    DedupFlushAdapter* dedup_adapter = nullptr);
 
 }  // namespace ROCKSDB_NAMESPACE

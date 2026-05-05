@@ -33,6 +33,10 @@
 #include "db/compaction/compaction_job.h"
 #include "db/convenience_impl.h"
 #include "db/db_info_dumper.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/dedup_work_queue.h"
+#include "db/dedup/offline_dedup_wal_decoder.h"
+#include "db/dedup/uvl_gc.h"
 #include "db/db_iter.h"
 #include "db/dbformat.h"
 #include "db/error_handler.h"
@@ -524,6 +528,27 @@ void DBImpl::UntrackDataFiles() {
 }
 
 Status DBImpl::CloseHelper() {
+  // ITEM-09c: stop offline dedup workers BEFORE touching mutex_ or
+  // any other bg machinery. A worker thread may be mid-LogAndApply
+  // (which acquires mutex_), so holding mutex_ while joining it would
+  // deadlock. Copy shared_ptrs out under the mutex, then Stop() with
+  // the mutex released.
+  {
+    std::vector<std::shared_ptr<DedupContext>> ctxs_to_stop;
+    {
+      InstrumentedMutexLock lock(&mutex_);
+      ctxs_to_stop.reserve(dedup_contexts_.size());
+      for (auto& kv : dedup_contexts_) {
+        ctxs_to_stop.push_back(kv.second);
+      }
+    }
+    for (auto& c : ctxs_to_stop) {
+      if (c && c->offline_worker) {
+        c->offline_worker->Stop();
+      }
+    }
+  }
+
   // Guarantee that there is no background error recovery in progress before
   // continuing with the shutdown
   mutex_.Lock();
@@ -2679,6 +2704,28 @@ Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
   TEST_SYNC_POINT("DBImpl::GetImpl:PostMemTableGet:0");
   TEST_SYNC_POINT("DBImpl::GetImpl:PostMemTableGet:1");
   PinnedIteratorsManager pinned_iters_mgr;
+
+  // ITEM-16b: DedupKV offline-path redirection. After the memtable
+  // and immutable-memtable misses, consult the DWQ. If the key's
+  // bloom-filter probe hits any live DWQEntry, open the referenced
+  // WAL file(s) and scan tail→head for the key, honoring snapshot
+  // visibility. This closes the window where an offline flush has
+  // enqueued a DWQEntry but its offline-worker drain hasn't yet
+  // installed an L0 SST.
+  if (!done && get_impl_options.get_value && get_impl_options.value != nullptr) {
+    DedupDwqGetOutcome dres = MaybeGetFromDedupDWQ(cfd, lkey.user_key(),
+                                                    snapshot,
+                                                    get_impl_options.value);
+    if (dres == DedupDwqGetOutcome::kFound) {
+      done = true;
+      s = Status::OK();
+    } else if (dres == DedupDwqGetOutcome::kDeleted) {
+      done = true;
+      s = Status::NotFound();
+    }
+    // kMissOrNotDedup: fall through to SST lookup below.
+  }
+
   if (!done) {
     PERF_TIMER_GUARD(get_from_output_files_time);
     sv->current->Get(
@@ -7082,6 +7129,266 @@ void DBImpl::TrackOrUntrackFiles(
     // will take care of deduping it.
     action(file_path, /*size=*/std::nullopt);
   }
+}
+
+// ITEM-12 DedupKV context accessor. Holds the big DB mutex only long
+// enough to copy the shared_ptr; the returned ptr is safe to use
+// after mutex release because ownership shares with the map entry.
+std::shared_ptr<DedupContext> DBImpl::GetDedupContext(uint32_t cf_id) const {
+  InstrumentedMutexLock l(&mutex_);
+  auto it = dedup_contexts_.find(cf_id);
+  if (it == dedup_contexts_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+Status DBImpl::TriggerUvlGcForTest(uint32_t cf_id,
+                                   uint64_t old_uvl_file_number,
+                                   uint64_t* new_uvl_file_number) {
+  if (new_uvl_file_number == nullptr) {
+    return Status::InvalidArgument("new_uvl_file_number must be non-null");
+  }
+  *new_uvl_file_number = 0;
+
+  std::shared_ptr<DedupContext> ctx = GetDedupContext(cf_id);
+  if (!ctx || !ctx->cit || !ctx->uvl_garbage_meter) {
+    return Status::InvalidArgument(
+        "DedupContext missing or incomplete for cf_id");
+  }
+
+  // Serialize GC on `(cf_id, old_uvl_file_number)` to avoid two
+  // concurrent triggers double-copying the same file.
+  {
+    InstrumentedMutexLock l(&mutex_);
+    auto key = std::make_pair(cf_id, old_uvl_file_number);
+    if (!uvl_gc_in_progress_.insert(key).second) {
+      return Status::Busy("UVL GC already in progress for this file");
+    }
+  }
+  auto release_slot = [&]() {
+    InstrumentedMutexLock l(&mutex_);
+    uvl_gc_in_progress_.erase(std::make_pair(cf_id, old_uvl_file_number));
+  };
+
+  ColumnFamilyData* cfd = versions_->GetColumnFamilySet()->GetColumnFamily(
+      cf_id);
+  if (cfd == nullptr) {
+    release_slot();
+    return Status::InvalidArgument("Column family not found");
+  }
+
+  VersionEdit edit;
+  edit.SetColumnFamily(cf_id);
+  UvlGcRewriteResult result;
+  Status s = UvlGcRewriter::Run(cfd, versions_.get(),
+                                immutable_db_options_.clock, ctx->cit.get(),
+                                ctx->uvl_garbage_meter.get(),
+                                old_uvl_file_number, &edit, &result);
+  if (!s.ok()) {
+    release_slot();
+    return s;
+  }
+
+  {
+    InstrumentedMutexLock lock(&mutex_);
+    const ReadOptions ro(Env::IOActivity::kFlush);
+    const WriteOptions wo;
+    s = versions_->LogAndApply(cfd, ro, wo, &edit, &mutex_,
+                               directories_.GetDbDir());
+    if (s.ok()) {
+      SuperVersionContext sv_context(/*create_superversion=*/true);
+      InstallSuperVersionAndScheduleWork(cfd, &sv_context);
+      sv_context.Clean();
+    }
+  }
+  if (!s.ok()) {
+    // MANIFEST write failed after we wrote the new UVL. Best-effort
+    // cleanup of the orphan UVL so the DB doesn't leak it.
+    if (result.new_uvl_file_number != 0) {
+      const auto& cf_paths = cfd->ioptions().cf_paths;
+      if (!cf_paths.empty() && immutable_db_options_.fs != nullptr) {
+        const std::string new_path = UvlFileName(
+            cf_paths.front().path, result.new_uvl_file_number);
+        immutable_db_options_.fs
+            ->DeleteFile(new_path, IOOptions(), /*dbg=*/nullptr)
+            .PermitUncheckedError();
+      }
+    }
+    release_slot();
+    return s;
+  }
+
+  // ITEM-18e: reclaim the old UVL when it contained only V2 large-
+  // branch records. After LogAndApply + SuperVersion refresh, no
+  // future Get or compaction drop will need the old file — V2
+  // large-branch reads route through CIT's retargeted pointer
+  // (ITEM-18d), and V2 drops read fp straight from the BlobIndex.
+  //
+  // Small-branch (LZ4-inline) records would force file-open on Get,
+  // so we keep the old file on disk in that case. V1 entries (pre-
+  // ITEM-18c) fall under the same restriction but aren't produced by
+  // the codebase post-18c; DEC-024 records the assumption.
+  if (!result.old_file_had_small_branch) {
+    const auto& cf_paths = cfd->ioptions().cf_paths;
+    if (!cf_paths.empty() && immutable_db_options_.fs != nullptr) {
+      const std::string old_path =
+          UvlFileName(cf_paths.front().path, old_uvl_file_number);
+      immutable_db_options_.fs
+          ->DeleteFile(old_path, IOOptions(), /*dbg=*/nullptr)
+          .PermitUncheckedError();
+    }
+  }
+
+  // ITEM-18f: update the size registry. The old file is forgotten
+  // (meter already forgot it via rewriter), and the new file, if any,
+  // is registered with its freshly-written byte count so the
+  // scheduler can evaluate it on future compactions.
+  ctx->ForgetUvlFile(old_uvl_file_number);
+  if (result.new_uvl_file_number != 0) {
+    ctx->RegisterUvlFile(result.new_uvl_file_number, result.live_bytes_copied);
+  }
+
+  // ITEM-20: tick the GC bytes-rewritten counter and fire the listener.
+  RecordTick(immutable_db_options_.statistics.get(),
+             DEDUPKV_UVL_GC_BYTES_REWRITTEN, result.live_bytes_copied);
+  if (!immutable_db_options_.listeners.empty()) {
+    DedupOpInfo info;
+    info.db_name = GetName();
+    info.cf_name = cfd->GetName();
+    info.cf_id = cf_id;
+    info.mode = DedupOperationType::kUvlGc;
+    info.job_id = 0;
+    info.keys_processed = result.live_records_copied;
+    info.dedup_hits = 0;
+    info.dedup_misses = 0;
+    info.uvl_bytes_appended = result.live_bytes_copied;
+    info.uvl_file_number = result.new_uvl_file_number;
+    info.status = Status::OK();
+    for (const auto& listener : immutable_db_options_.listeners) {
+      if (listener) {
+        listener->OnDedupOperation(this, info);
+      }
+    }
+  }
+
+  *new_uvl_file_number = result.new_uvl_file_number;
+  release_slot();
+  return Status::OK();
+}
+
+void DBImpl::MaybeScheduleAutoUvlGc() {
+  // Snapshot the list of (cf_id → DedupContext) under the mutex; the
+  // rewriter itself runs unlocked, re-locking only for LogAndApply.
+  std::vector<std::pair<uint32_t, std::shared_ptr<DedupContext>>> snapshots;
+  {
+    InstrumentedMutexLock l(&mutex_);
+    snapshots.reserve(dedup_contexts_.size());
+    for (const auto& kv : dedup_contexts_) {
+      snapshots.emplace_back(kv.first, kv.second);
+    }
+  }
+  for (const auto& entry : snapshots) {
+    const uint32_t cf_id = entry.first;
+    const auto& ctx = entry.second;
+    if (!ctx || !ctx->cit || !ctx->uvl_garbage_meter) {
+      continue;
+    }
+    // Per-CF threshold (runtime-tunable via MutableCFOptions).
+    double threshold = 0.5;
+    {
+      InstrumentedMutexLock l(&mutex_);
+      auto* cfd = versions_->GetColumnFamilySet()->GetColumnFamily(cf_id);
+      if (cfd == nullptr) continue;
+      threshold = cfd->GetLatestMutableCFOptions().dedupkv.uvl_gc_threshold;
+    }
+    // A threshold > 1.0 disables auto-GC (useful for tests that want
+    // to observe the meter without the GC path Forgetting entries).
+    if (threshold <= 0.0 || threshold >= 1.0) continue;
+
+    const auto sizes = ctx->SnapshotUvlFileSizes();
+    // Collect candidates first so we don't iterate `sizes` while
+    // RunUvlGc mutates it (Forget(old) + Register(new)).
+    std::vector<uint64_t> candidates;
+    for (const auto& kv : sizes) {
+      const uint64_t file_number = kv.first;
+      const uint64_t total = kv.second;
+      if (total == 0) continue;
+      const uint64_t invalid = ctx->uvl_garbage_meter->InvalidBytes(file_number);
+      const double ratio =
+          static_cast<double>(invalid) / static_cast<double>(total);
+      if (ratio > threshold) {
+        candidates.push_back(file_number);
+      }
+    }
+    for (const uint64_t file_number : candidates) {
+      uint64_t new_file_number = 0;
+      // Reuse the test-hook driver — same LogAndApply + SuperVersion
+      // refresh + reclamation flow. Its `uvl_gc_in_progress_` gate
+      // prevents double-scheduling if a test and the auto path race.
+      Status s = TriggerUvlGcForTest(cf_id, file_number, &new_file_number);
+      // Best-effort: log and continue. A transient failure (IO error,
+      // MANIFEST write) leaves the file in place and the meter will
+      // re-fire on the next compaction's invalidation.
+      if (!s.ok() && !s.IsBusy()) {
+        ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                       "[DedupKV] Auto UVL GC failed for cf=%u file=%" PRIu64
+                       ": %s",
+                       cf_id, file_number, s.ToString().c_str());
+      }
+    }
+  }
+}
+
+DBImpl::DedupDwqGetOutcome DBImpl::MaybeGetFromDedupDWQ(
+    ColumnFamilyData* cfd, const Slice& user_key, SequenceNumber snapshot_seq,
+    PinnableSlice* value) {
+  if (cfd == nullptr || value == nullptr) {
+    return DedupDwqGetOutcome::kMissOrNotDedup;
+  }
+  std::shared_ptr<DedupContext> ctx = GetDedupContext(cfd->GetID());
+  if (!ctx || !ctx->dwq || ctx->dwq->Size() == 0) {
+    return DedupDwqGetOutcome::kMissOrNotDedup;
+  }
+  std::vector<std::shared_ptr<DWQEntry>> hits;
+  if (!ctx->dwq->KeyMightBePresent(user_key, &hits) || hits.empty()) {
+    return DedupDwqGetOutcome::kMissOrNotDedup;
+  }
+  // DWQ::KeyMightBePresent appends hits in FIFO (oldest→newest)
+  // order. Iterate newest-first so a later flush's version wins.
+  for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
+    const auto& entry = *it;
+    const std::string wal_path = LogFileName(
+        immutable_db_options_.GetWalDir(), entry->wal_file_number());
+    std::vector<OfflineWalRecord> records;
+    Status decode_s = DecodeWalFileForOfflineDedup(
+        immutable_db_options_.fs.get(), immutable_db_options_.clock, wal_path,
+        entry->wal_file_number(), cfd->GetID(), &records,
+        immutable_db_options_.info_log);
+    if (!decode_s.ok()) {
+      // Worker may have just unlinked the WAL right after completing
+      // the drain. Treat as "not in this entry" and move to the next.
+      continue;
+    }
+    // Tail→head scan for the user_key, honoring snapshot visibility.
+    for (auto rit = records.rbegin(); rit != records.rend(); ++rit) {
+      if (rit->seq > snapshot_seq) {
+        continue;  // invisible to this reader's snapshot
+      }
+      if (Slice(rit->key) != user_key) {
+        continue;
+      }
+      if (rit->type == kTypeValue) {
+        value->Reset();
+        value->PinSelf(Slice(rit->value));
+        return DedupDwqGetOutcome::kFound;
+      }
+      // kTypeDeletion / kTypeSingleDeletion — the user_key has been
+      // tombstoned. Don't fall through to SST.
+      return DedupDwqGetOutcome::kDeleted;
+    }
+  }
+  return DedupDwqGetOutcome::kMissOrNotDedup;
 }
 
 }  // namespace ROCKSDB_NAMESPACE

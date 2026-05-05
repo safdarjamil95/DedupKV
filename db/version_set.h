@@ -961,6 +961,15 @@ class Version {
                  FilePrefetchBuffer* prefetch_buffer, PinnableSlice* value,
                  uint64_t* bytes_read) const;
 
+  // ITEM-16a: fetch a DedupKV UVL record's value. Opens the UVL file by
+  // number under cf_paths[0], reads the record at [offset, offset+size),
+  // and decompresses (kLz4Inline → raw) before returning. Intended to be
+  // called via Version::GetBlob when BlobIndex::IsDedupKVUvl() is true.
+  Status GetUvlValue(const ReadOptions& read_options, const Slice& user_key,
+                     uint64_t file_number, uint64_t offset, uint64_t size,
+                     CompressionType compression, PinnableSlice* value,
+                     uint64_t* bytes_read) const;
+
   struct BlobReadContext {
     BlobReadContext(const BlobIndex& blob_idx, const KeyContext* key_ctx)
         : blob_index(blob_idx), key_context(key_ctx) {}

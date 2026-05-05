@@ -88,6 +88,7 @@ struct OptionsHelper {
       compression_type_string_map;
   static std::unordered_map<std::string, PrepopulateBlobCache>
       prepopulate_blob_cache_string_map;
+  static std::unordered_map<std::string, DedupMode> dedup_mode_string_map;
   static std::unordered_map<std::string, CompactionStopStyle>
       compaction_stop_style_string_map;
   static std::unordered_map<std::string, EncodingType> encoding_type_string_map;
@@ -118,5 +119,6 @@ static auto& compaction_pri_string_map =
 static auto& temperature_string_map = OptionsHelper::temperature_string_map;
 static auto& prepopulate_blob_cache_string_map =
     OptionsHelper::prepopulate_blob_cache_string_map;
+static auto& dedup_mode_string_map = OptionsHelper::dedup_mode_string_map;
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -63,7 +63,7 @@ class IODispatcher;
 struct Options;
 struct DbPath;
 
-using FileTypeSet = SmallEnumSet<FileType, FileType::kBlobFile>;
+using FileTypeSet = SmallEnumSet<FileType, FileType::kUvlFile>;
 using CompactionStyleSet =
     SmallEnumSet<CompactionStyle, CompactionStyle::kCompactionStyleNone>;
 

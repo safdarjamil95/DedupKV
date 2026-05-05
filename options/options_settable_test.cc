@@ -536,6 +536,11 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
        sizeof(uint64_t)},
       {offsetof(struct ColumnFamilyOptions, blob_cache),
        sizeof(std::shared_ptr<Cache>)},
+      // DedupKVOptions nested struct — padding bytes are not reachable
+      // via GetColumnFamilyOptionsFromString(). Exclude here and
+      // verify field-by-field after the string setter call.
+      {offsetof(struct ColumnFamilyOptions, dedupkv),
+       sizeof(struct DedupKVOptions)},
       {offsetof(struct ColumnFamilyOptions, comparator), sizeof(Comparator*)},
       {offsetof(struct ColumnFamilyOptions, merge_operator),
        sizeof(std::shared_ptr<MergeOperator>)},
@@ -696,7 +701,10 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       "memtable_avg_op_scan_flush_trigger=12;"
       "cf_allow_ingest_behind=1;"
       "memtable_batch_lookup_optimization=1;"
-      "verify_output_flags=2053;",
+      "verify_output_flags=2053;"
+      "dedupkv={enable=true;mode=kInlineOnly;memory_threshold_pct=0.75;"
+      "chunk_threshold_bytes=128;uvl_gc_threshold=0.25;"
+      "cold_tier_enabled=true;cit_checkpoint_every_flushes=4};",
       new_options));
 
   ASSERT_NE(new_options->blob_cache.get(), nullptr);
@@ -704,6 +712,16 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
   ASSERT_EQ(unset_bytes_base,
             NumUnsetBytes(new_options_ptr, sizeof(ColumnFamilyOptions),
                           kColumnFamilyOptionsExcluded));
+
+  // Custom verification since dedupkv was excluded (nested-struct
+  // padding — ITEM-11).
+  ASSERT_EQ(new_options->dedupkv.enable, true);
+  ASSERT_EQ(new_options->dedupkv.mode, DedupMode::kInlineOnly);
+  ASSERT_DOUBLE_EQ(new_options->dedupkv.memory_threshold_pct, 0.75);
+  ASSERT_EQ(new_options->dedupkv.chunk_threshold_bytes, 128u);
+  ASSERT_DOUBLE_EQ(new_options->dedupkv.uvl_gc_threshold, 0.25);
+  ASSERT_EQ(new_options->dedupkv.cold_tier_enabled, true);
+  ASSERT_EQ(new_options->dedupkv.cit_checkpoint_every_flushes, 4u);
 
   // Custom verification since compaction_options_fifo was in
   // kColumnFamilyOptionsExcluded

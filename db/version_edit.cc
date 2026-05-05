@@ -161,6 +161,23 @@ bool VersionEdit::EncodeTo(std::string* dst,
     blob_file_garbage.EncodeTo(dst);
   }
 
+  // ITEM-14b: DedupKV UVL file installations. Same pattern as
+  // BlobFileAddition — emit a kUvlFileAddition tag per record. Tag is
+  // mandatory (below kTagSafeIgnoreMask) so old binaries fail rather
+  // than silently lose UVL files.
+  for (const auto& uvl_file_addition : uvl_file_additions_) {
+    PutVarint32(dst, kUvlFileAddition);
+    uvl_file_addition.EncodeTo(dst);
+  }
+
+  // ITEM-18b: DedupKV UVL GC records. Mandatory tag: an old binary
+  // opening a GC'd MANIFEST must fail rather than silently miss the
+  // rewrite.
+  for (const auto& uvl_file_garbage : uvl_file_garbages_) {
+    PutVarint32(dst, kUvlFileGarbage);
+    uvl_file_garbage.EncodeTo(dst);
+  }
+
   for (const auto& wal_addition : wal_additions_) {
     PutVarint32(dst, kWalAddition2);
     std::string encoded;
@@ -732,6 +749,28 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
         break;
       }
 
+      // ITEM-14b: DedupKV UVL file installation.
+      case kUvlFileAddition: {
+        UvlFileAddition uvl_file_addition;
+        const Status s = uvl_file_addition.DecodeFrom(&input);
+        if (!s.ok()) {
+          return s;
+        }
+        AddUvlFile(std::move(uvl_file_addition));
+        break;
+      }
+
+      // ITEM-18b: DedupKV UVL GC record.
+      case kUvlFileGarbage: {
+        UvlFileGarbage uvl_file_garbage;
+        const Status s = uvl_file_garbage.DecodeFrom(&input);
+        if (!s.ok()) {
+          return s;
+        }
+        AddUvlFileGarbage(std::move(uvl_file_garbage));
+        break;
+      }
+
       case kWalAddition: {
         WalAddition wal_addition;
         const Status s = wal_addition.DecodeFrom(&input);
@@ -991,6 +1030,16 @@ std::string VersionEdit::DebugString(bool hex_key) const {
     r.append(blob_file_addition.DebugString());
   }
 
+  for (const auto& uvl_file_addition : uvl_file_additions_) {
+    r.append("\n  UvlFileAddition: ");
+    r.append(uvl_file_addition.DebugString());
+  }
+
+  for (const auto& uvl_file_garbage : uvl_file_garbages_) {
+    r.append("\n  UvlFileGarbage: ");
+    r.append(uvl_file_garbage.DebugString());
+  }
+
   for (const auto& blob_file_garbage : blob_file_garbages_) {
     r.append("\n  BlobFileGarbage: ");
     r.append(blob_file_garbage.DebugString());
@@ -1134,6 +1183,20 @@ std::string VersionEdit::DebugJSON(int edit_num, bool hex_key) const {
     for (const auto& blob_file_garbage : blob_file_garbages_) {
       jw.StartArrayedObject();
       jw << blob_file_garbage;
+      jw.EndArrayedObject();
+    }
+
+    jw.EndArray();
+  }
+
+  if (!uvl_file_garbages_.empty()) {
+    jw << "UvlFileGarbages";
+
+    jw.StartArray();
+
+    for (const auto& uvl_file_garbage : uvl_file_garbages_) {
+      jw.StartArrayedObject();
+      jw << uvl_file_garbage;
       jw.EndArrayedObject();
     }
 

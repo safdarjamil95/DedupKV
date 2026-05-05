@@ -54,7 +54,10 @@ enum FileType {
   kIdentityFile,
   kOptionsFile,
   kBlobFile,
-  kCompactionProgressFile
+  kCompactionProgressFile,
+  // DedupKV Unique Value Log — stores deduplicated values; written by
+  // flush/offline dedup, read on Get after UVL BlobIndex dispatch.
+  kUvlFile
 };
 
 // User-oriented representation of internal key types.

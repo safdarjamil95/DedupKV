@@ -51,6 +51,11 @@ std::string BlobFileName(const std::string& bdirname, uint64_t number);
 std::string BlobFileName(const std::string& dbname, const std::string& blob_dir,
                          uint64_t number);
 
+// Name of a DedupKV UVL file (suffix ".uvl"). The 6-digit numbering and
+// dbname-prefix conventions match BlobFileName.
+std::string UvlFileName(uint64_t number);
+std::string UvlFileName(const std::string& uvl_dir, uint64_t number);
+
 std::string ArchivalDirectory(const std::string& dbname);
 
 //  Return the name of the archived log file with the specified number

@@ -67,6 +67,11 @@ Status DBImpl::Merge(const WriteOptions& o, ColumnFamilyHandle* column_family,
     return s;
   }
   auto cfh = static_cast_with_check<ColumnFamilyHandleImpl>(column_family);
+  // ITEM-13 / AMBIGUITY-007: DedupKV can't dedup partial merge
+  // operands, so Merge is disallowed when dedup is enabled on the CF.
+  if (cfh->cfd()->GetLatestMutableCFOptions().dedupkv.enable) {
+    return Status::NotSupported("DedupKV does not support Merge");
+  }
   if (!cfh->cfd()->ioptions().merge_operator) {
     return Status::NotSupported("Provide a merge_operator when opening DB");
   } else {
@@ -79,6 +84,10 @@ Status DBImpl::Merge(const WriteOptions& o, ColumnFamilyHandle* column_family,
   const Status s = FailIfTsMismatchCf(column_family, ts);
   if (!s.ok()) {
     return s;
+  }
+  auto cfh = static_cast_with_check<ColumnFamilyHandleImpl>(column_family);
+  if (cfh->cfd()->GetLatestMutableCFOptions().dedupkv.enable) {
+    return Status::NotSupported("DedupKV does not support Merge");
   }
   return DB::Merge(o, column_family, key, ts, val);
 }
@@ -2628,6 +2637,10 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
       }
     }
     if (s.ok()) {
+      // ITEM-09c: capture the WAL the about-to-be-IMT was writing to
+      // so FlushJob's offline branch can name the exact file in its
+      // DWQEntry. Set under the same guard as cur_wal_number_ advance.
+      cfd->mem()->SetLogNumber(cur_wal_number_);
       cur_wal_number_ = new_log_number;
       wal_empty_ = true;
       wal_dir_synced_ = false;

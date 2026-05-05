@@ -291,6 +291,21 @@ class CompactionIterator {
   // Do final preparations before presenting the output to the callee.
   void PrepareOutput();
 
+  // ITEM-17: if the supplied (ikey, value) carries a kTypeBlobIndex
+  // of subtype kDedupKVUvl, decode the BlobIndex, read the record's
+  // fingerprint from the UVL, and DecRefcount in the CIT. Called at
+  // every drop site so a compacted-away dedup entry relinquishes its
+  // CIT reference. No-op when dedup is disabled for this CF.
+  //
+  // The (ikey_, value_) wrapper exists for rule-A-style sites where
+  // the drop target is the iterator's current key; the generic
+  // overload exists for sites like SingleDelete-match and the
+  // bottommost-delete loop, which drop `input_.key()` / `input_.
+  // value()` without updating `ikey_`/`value_`.
+  void MaybeDecrementDedupRefImpl(const ParsedInternalKey& ikey,
+                                  const Slice& value);
+  void MaybeDecrementDedupRefForDroppedKey();
+
   // Passes the output value to the blob file builder (if any), and replaces it
   // with the corresponding blob reference if it has been actually written to a
   // blob file (i.e. if it passed the value size check). Returns true if the

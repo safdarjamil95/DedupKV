@@ -9,6 +9,11 @@
 #include <cinttypes>
 
 #include "db/builder.h"
+#include "db/dedup/cit.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/offline_dedup_install_sink.h"
+#include "db/dedup/offline_dedup_worker.h"
+#include "db/dedup/uvl_gc.h"
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
 #include "db/periodic_task_scheduler.h"
@@ -2630,8 +2635,114 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
             "its options.merge_operator is non-null",
             cfd->GetName().c_str());
       }
+      // ITEM-13 / AMBIGUITY-007: refuse CFs that enable both Merge and
+      // DedupKV — the two are mutually incompatible because dedup
+      // cannot be run against partial merge operands.
+      if (s.ok() && cfd->ioptions().merge_operator != nullptr &&
+          cfd->GetLatestMutableCFOptions().dedupkv.enable) {
+        s = Status::InvalidArgument(
+            "DedupKV does not support merge_operator (CF '" +
+            cfd->GetName() + "')");
+      }
       if (!s.ok()) {
         break;
+      }
+
+      // ITEM-12: construct DedupContext for CFs that enabled DedupKV.
+      // The per-CF memtable budget = write_buffer_size *
+      // max_write_buffer_number, matching AMBIGUITY-011.
+      const auto& mcfo = cfd->GetLatestMutableCFOptions();
+      if (mcfo.dedupkv.enable) {
+        const uint64_t capacity =
+            static_cast<uint64_t>(mcfo.write_buffer_size) *
+            static_cast<uint64_t>(
+                std::max(1, mcfo.max_write_buffer_number));
+        auto ctx = MakeDedupContext(mcfo.dedupkv, capacity);
+        if (ctx != nullptr) {
+          // ITEM-20: forward DB-wide Statistics so DedupKV inner loops
+          // can emit DEDUPKV_* tickers/histograms.
+          ctx->db_statistics =
+              impl->immutable_db_options_.statistics.get();
+          // ITEM-15c: wire the memtable alloc/free hooks to feed the
+          // elastic controller's memory-utilization signal. This only
+          // affects MemTables constructed *after* this point — any
+          // pre-existing MT (built during VersionSet recovery) will
+          // undercharge until its next rotation, which is acceptable
+          // for elastic-control purposes (undercounting skews toward
+          // inline, the data-safe default).
+          cfd->SetDedupMemoryMonitor(ctx->memory_monitor);
+
+          // ITEM-09c: spawn the offline dedup worker. Captures the
+          // CF and DBImpl via raw pointers — both outlive the worker
+          // because Stop() is called before dedup_contexts_ is
+          // destroyed in ~DBImpl.
+          ColumnFamilyData* const captured_cfd = cfd;
+          DBImpl* const captured_impl = impl.get();
+          const uint32_t captured_cf_id = cfd->GetID();
+          DedupContext* const ctx_raw = ctx.get();
+
+          OfflineDedupWorker::Options wopts;
+          wopts.dwq = ctx_raw->dwq.get();
+          wopts.cit = ctx_raw->cit.get();
+          wopts.dgd_stats = ctx_raw->dgd_stats.get();
+          wopts.db_statistics = ctx_raw->db_statistics;
+          wopts.cf_id = cfd->GetID();
+          wopts.cf_name = cfd->GetName();
+          wopts.listeners = &impl->immutable_db_options_.listeners;
+          wopts.db_for_listeners = impl.get();
+          wopts.db_name = impl->immutable_db_options_.db_paths.empty()
+                              ? std::string()
+                              : impl->immutable_db_options_.db_paths.front().path;
+          wopts.fs = impl->immutable_db_options_.fs.get();
+          wopts.clock = impl->immutable_db_options_.clock;
+          wopts.wal_dir = impl->immutable_db_options_.GetWalDir();
+          wopts.uvl_dir = cfd->ioptions().cf_paths.front().path;
+          wopts.chunk_threshold_bytes = mcfo.dedupkv.chunk_threshold_bytes;
+          wopts.info_log = impl->immutable_db_options_.info_log;
+          wopts.next_uvl_file_number = [captured_impl]() {
+            // Share the VersionSet file-number pool so SST and UVL
+            // files never collide.
+            InstrumentedMutexLock lock(captured_impl->mutex());
+            return captured_impl->GetVersionSet()->NewFileNumber();
+          };
+          wopts.sink_factory =
+              [captured_impl, captured_cfd](uint64_t /*wal*/, uint64_t uvl)
+              -> std::unique_ptr<OfflineDedupSink> {
+            return std::make_unique<OfflineDedupInstallSink>(
+                captured_impl, captured_cfd, uvl,
+                captured_impl->immutable_db_options_.info_log);
+          };
+          (void)captured_cf_id;  // reserved for per-CF stats later
+          ctx_raw->offline_worker =
+              std::make_unique<OfflineDedupWorker>(std::move(wopts));
+          ctx_raw->offline_worker->Start();
+
+          // ITEM-17: also expose the DedupContext on the CFD so
+          // CompactionIterator can DecRefcount on dropped dedup keys
+          // via `compaction_->column_family_data()->dedup_context()`.
+          cfd->SetDedupContext(ctx);
+
+          // ITEM-19: rebuild CIT + UVL size registry from the UVL
+          // files that survive on disk. Without this, a close+reopen
+          // after ITEM-18b/e GC loses the retargeted CIT pointers,
+          // and ITEM-18d's Get indirection has nothing to follow.
+          DedupContext* const ctx_for_rebuild = ctx.get();
+          Status rebuild_s = CitRebuild::Run(
+              cfd, impl->immutable_db_options_.clock, ctx_for_rebuild->cit.get(),
+              [ctx_for_rebuild](uint64_t fn, uint64_t tb) {
+                ctx_for_rebuild->RegisterUvlFile(fn, tb);
+              },
+              impl->immutable_db_options_.info_log.get());
+          if (!rebuild_s.ok()) {
+            ROCKS_LOG_WARN(impl->immutable_db_options_.info_log,
+                           "[DedupKV] CIT rebuild failed for cf '%s': %s "
+                           "(continuing with empty CIT)",
+                           cfd->GetName().c_str(),
+                           rebuild_s.ToString().c_str());
+          }
+
+          impl->dedup_contexts_.emplace(cfd->GetID(), std::move(ctx));
+        }
       }
     }
   }

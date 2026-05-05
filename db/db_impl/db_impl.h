@@ -86,6 +86,7 @@ class WriteCallback;
 struct JobContext;
 struct ExternalSstFileInfo;
 struct MemTableInfo;
+struct DedupContext;  // db/dedup/dedup_context.h — owned by DBImpl
 
 // Class to maintain directories for all database paths other than main one.
 class Directories {
@@ -1133,6 +1134,12 @@ class DBImpl : public DB {
 
   VersionSet* GetVersionSet() const { return versions_.get(); }
 
+  // ITEM-09b: OfflineDedupInstallSink needs the DB-level directory
+  // handle to hand to VersionSet::LogAndApply for CURRENT/MANIFEST
+  // fsyncing. The nested Directories::GetDbDir() is private-ish;
+  // expose through DBImpl so the sink doesn't grow a friend link.
+  FSDirectory* GetDbDir() { return directories_.GetDbDir(); }
+
   Status WaitForCompact(
       const WaitForCompactOptions& wait_for_compact_options) override;
 
@@ -1364,6 +1371,49 @@ class DBImpl : public DB {
   static std::string GenerateDbSessionId(Env* env);
 
   bool seq_per_batch() const { return seq_per_batch_; }
+
+  // ---- DedupKV (ITEM-12) ----
+  //
+  // Per-CF dedup state. Populated at DB::Open for CFs whose
+  // `cfo.dedupkv.enable == true`; left empty otherwise. Lifetime runs
+  // from post-open through destructor; FlushJob / CompactionIterator /
+  // GetImpl look up their context by CF id.
+  //
+  // Access is guarded by `mutex_` (the big DB lock) — insertions
+  // happen under that mutex during Open/CreateColumnFamily, and
+  // readers snapshot a shared_ptr so the entry remains valid after
+  // the mutex is released.
+  std::shared_ptr<DedupContext> GetDedupContext(uint32_t cf_id) const;
+
+  // ITEM-16b: outcome of the DWQ+WAL Get redirection.
+  enum class DedupDwqGetOutcome {
+    kMissOrNotDedup,  // fall through to SST lookup
+    kFound,            // `value` populated, return OK
+    kDeleted,          // user-key tombstoned in WAL, return NotFound
+  };
+  DedupDwqGetOutcome MaybeGetFromDedupDWQ(ColumnFamilyData* cfd,
+                                          const Slice& user_key,
+                                          SequenceNumber snapshot_seq,
+                                          PinnableSlice* value);
+
+  // ITEM-18b: test-only on-demand UVL GC. Runs the rewriter for
+  // `old_uvl_file_number` on the CF identified by `cf_id`, commits the
+  // resulting VersionEdit via LogAndApply under the DB mutex, and
+  // refreshes SuperVersion. On success `*new_uvl_file_number` receives
+  // the number of the freshly-written UVL (0 if every record in the
+  // source file had refcount 0). Guarded by `uvl_gc_in_progress_` so
+  // concurrent calls on the same file serialize.
+  Status TriggerUvlGcForTest(uint32_t cf_id, uint64_t old_uvl_file_number,
+                             uint64_t* new_uvl_file_number);
+
+  // ITEM-18f: walk every dedup-enabled CF and run the rewriter for any
+  // UVL whose invalid-byte ratio exceeds the CF's configured
+  // `uvl_gc_threshold`. Called from the unlocked window of
+  // BackgroundCallCompaction, so post-compaction accumulations (ITEM-
+  // 18a meter charges) are picked up naturally. Must be called with
+  // `mutex_` NOT held — `RunUvlGc` acquires it internally for the
+  // LogAndApply portion.
+  void MaybeScheduleAutoUvlGc();
 
  protected:
   const std::string dbname_;
@@ -1747,6 +1797,10 @@ class DBImpl : public DB {
   friend class DB;
   friend class DBImplSecondary;
   friend class ErrorHandler;
+  // ITEM-09b: lets OfflineDedupInstallSink call
+  // InstallSuperVersionAndScheduleWork after LogAndApply. Narrower
+  // than widening the method to public.
+  friend class OfflineDedupInstallSink;
   friend class InternalStats;
   friend class PessimisticTransaction;
   friend class TransactionBaseImpl;
@@ -3249,6 +3303,19 @@ class DBImpl : public DB {
   // The number of LockWAL called without matching UnlockWAL call.
   // See also lock_wal_write_token_
   uint32_t lock_wal_count_ = 0;
+
+  // ---- DedupKV (ITEM-12) ----
+  // Map cf_id → DedupContext. Mutated under `mutex_` during Open /
+  // CreateColumnFamily / DropColumnFamily; readers copy the shared_ptr
+  // to keep the context alive past the lock release.
+  std::unordered_map<uint32_t, std::shared_ptr<DedupContext>>
+      dedup_contexts_;
+
+  // ITEM-18b: set of `(cf_id, uvl_file_number)` pairs currently being
+  // rewritten by UVL GC. Consulted under `mutex_` before starting a
+  // rewrite so two concurrent GC triggers can't duplicate-copy the
+  // same file.
+  std::set<std::pair<uint32_t, uint64_t>> uvl_gc_in_progress_;
 };
 
 class GetWithTimestampReadCallback : public ReadCallback {

@@ -748,6 +748,25 @@ set(SOURCES
         db/db_info_dumper.cc
         db/db_iter.cc
         db/dbformat.cc
+        db/dedup/cit.cc
+        db/dedup/cit_cold_tier.cc
+        db/dedup/dedup_context.cc
+        db/dedup/dedup_flush_adapter.cc
+        db/dedup/dedup_offline_enqueue.cc
+        db/dedup/dedup_work_queue.cc
+        db/dedup/dgd.cc
+        db/dedup/memory_monitor.cc
+        db/dedup/offline_dedup.cc
+        db/dedup/offline_dedup_install_sink.cc
+        db/dedup/offline_dedup_wal_decoder.cc
+        db/dedup/offline_dedup_worker.cc
+        db/dedup/uvl_garbage_meter.cc
+        db/dedup/uvl_file_addition.cc
+        db/dedup/uvl_file_builder.cc
+        db/dedup/uvl_file_garbage.cc
+        db/dedup/uvl_file_reader.cc
+        db/dedup/uvl_gc.cc
+        db/dedup/uvl_log_format.cc
         db/error_handler.cc
         db/event_helpers.cc
         db/experimental.cc
@@ -942,6 +961,7 @@ set(SOURCES
         util/random.cc
         util/rate_limiter.cc
         util/ribbon_config.cc
+        util/sha1.cc
         util/slice.cc
         util/file_checksum_helper.cc
         util/status.cc
@@ -1438,6 +1458,25 @@ if(WITH_TESTS)
         db/db_write_buffer_manager_test.cc
         db/db_write_test.cc
         db/dbformat_test.cc
+        db/dedup/blob_index_dedup_test.cc
+        db/dedup/cit_cold_tier_test.cc
+        db/dedup/cit_test.cc
+        db/dedup/dedup_context_test.cc
+        db/dedup/dedup_flush_adapter_test.cc
+        db/dedup/dedup_flush_path_test.cc
+        db/dedup/dedup_gating_test.cc
+        db/dedup/dedup_offline_enqueue_test.cc
+        db/dedup/dedup_options_test.cc
+        db/dedup/dedup_work_queue_test.cc
+        db/dedup/dedupkv_integration_test.cc
+        db/dedup/dgd_test.cc
+        db/dedup/memory_monitor_test.cc
+        db/dedup/offline_dedup_test.cc
+        db/dedup/offline_dedup_worker_test.cc
+        db/dedup/uvl_file_addition_test.cc
+        db/dedup/uvl_file_builder_test.cc
+        db/dedup/uvl_file_reader_test.cc
+        db/dedup/uvl_log_format_test.cc
         db/deletefile_test.cc
         db/error_handler_fs_test.cc
         db/obsolete_files_test.cc
@@ -1535,6 +1574,7 @@ if(WITH_TESTS)
         util/rate_limiter_test.cc
         util/repeatable_thread_test.cc
         util/ribbon_test.cc
+        util/sha1_test.cc
         util/slice_test.cc
         util/slice_transform_test.cc
         util/string_util_test.cc

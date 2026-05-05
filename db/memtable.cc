@@ -9,6 +9,8 @@
 
 #include "db/memtable.h"
 
+#include "db/dedup/memory_monitor.h"
+
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -80,7 +82,8 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
                    const ImmutableOptions& ioptions,
                    const MutableCFOptions& mutable_cf_options,
                    WriteBufferManager* write_buffer_manager,
-                   SequenceNumber latest_seq, uint32_t column_family_id)
+                   SequenceNumber latest_seq, uint32_t column_family_id,
+                   std::shared_ptr<DedupMemoryMonitor> dedup_memory_monitor)
     : comparator_(cmp),
       moptions_(ioptions, mutable_cf_options),
       kArenaBlockSize(Arena::OptimizeBlockSize(moptions_.arena_block_size)),
@@ -118,6 +121,7 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
           ioptions.memtable_insert_with_hint_prefix_extractor.get()),
       oldest_key_time_(std::numeric_limits<uint64_t>::max()),
       approximate_memory_usage_(0),
+      dedup_memory_monitor_(std::move(dedup_memory_monitor)),
       memtable_max_range_deletions_(
           mutable_cf_options.memtable_max_range_deletions),
       key_validation_callback_(
@@ -172,6 +176,12 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
 
 MemTable::~MemTable() {
   mem_tracker_.FreeMem();
+  // ITEM-15c: discharge whatever this MT charged over its lifetime so
+  // the elastic controller sees utilization drop when the MT is freed
+  // (post-flush / mempurge / DB close).
+  if (dedup_memory_monitor_) {
+    dedup_memory_monitor_->OnMemtableFree(monitor_charged_bytes_.LoadRelaxed());
+  }
   assert(refs_ == 0);
 }
 
@@ -1014,6 +1024,11 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
 
     num_entries_.FetchAddRelaxed(1);
     data_size_.FetchAddRelaxed(encoded_len);
+    // ITEM-15c: charge the elastic-controller monitor.
+    if (dedup_memory_monitor_) {
+      dedup_memory_monitor_->OnMemtableAlloc(encoded_len);
+      monitor_charged_bytes_.FetchAddRelaxed(encoded_len);
+    }
     if (type == kTypeDeletion || type == kTypeSingleDeletion ||
         type == kTypeDeletionWithTimestamp) {
       num_deletes_.FetchAddRelaxed(1);
@@ -1054,6 +1069,12 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
     assert(post_process_info != nullptr);
     post_process_info->num_entries++;
     post_process_info->data_size += encoded_len;
+    // ITEM-15c: charge the elastic-controller monitor from the
+    // concurrent-insert path too.
+    if (dedup_memory_monitor_) {
+      dedup_memory_monitor_->OnMemtableAlloc(encoded_len);
+      monitor_charged_bytes_.FetchAddRelaxed(encoded_len);
+    }
     if (type == kTypeDeletion || type == kTypeSingleDeletion ||
         type == kTypeDeletionWithTimestamp) {
       post_process_info->num_deletes++;

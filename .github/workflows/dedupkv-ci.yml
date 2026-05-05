@@ -1,0 +1,76 @@
+name: DedupKV CI
+
+on:
+  push:
+    branches: [main, dedupkv-public]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-build-and-dedup-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libgflags-dev \
+            libsnappy-dev \
+            zlib1g-dev \
+            libbz2-dev \
+            liblz4-dev \
+            libzstd-dev
+
+      - name: Build static library and DedupKV driver
+        run: make static_lib dedupkv_driver -j"$(nproc)"
+
+      - name: Build DedupKV test binaries
+        run: |
+          make \
+            sha1_test \
+            uvl_log_format_test \
+            uvl_file_builder_test \
+            uvl_file_reader_test \
+            cit_test \
+            cit_cold_tier_test \
+            dgd_test \
+            dedup_work_queue_test \
+            dedup_options_test \
+            dedup_context_test \
+            dedup_gating_test \
+            dedup_flush_adapter_test \
+            dedup_offline_enqueue_test \
+            offline_dedup_test \
+            offline_dedup_worker_test \
+            blob_index_dedup_test \
+            dedup_flush_path_test \
+            dedupkv_integration_test \
+            -j"$(nproc)"
+
+      - name: Run focused DedupKV tests
+        run: |
+          ./sha1_test
+          ./uvl_log_format_test
+          ./uvl_file_builder_test
+          ./uvl_file_reader_test
+          ./cit_test
+          ./cit_cold_tier_test
+          ./dgd_test
+          ./dedup_work_queue_test
+          ./dedup_options_test
+          ./dedup_context_test
+          ./dedup_gating_test
+          ./dedup_flush_adapter_test
+          ./dedup_offline_enqueue_test
+          ./offline_dedup_test
+          ./offline_dedup_worker_test
+          ./blob_index_dedup_test
+          ./dedup_flush_path_test
+          ./dedupkv_integration_test

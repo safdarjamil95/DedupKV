@@ -1387,6 +1387,9 @@ random_test: $(OBJ_DIR)/util/random_test.o  $(TEST_LIBRARY) $(LIBRARY)
 ribbon_test: $(OBJ_DIR)/util/ribbon_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+sha1_test: $(OBJ_DIR)/util/sha1_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 option_change_migration_test: $(OBJ_DIR)/utilities/option_change_migration/option_change_migration_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1663,6 +1666,63 @@ wal_edit_test: $(OBJ_DIR)/db/wal_edit_test.o $(TEST_LIBRARY) $(LIBRARY)
 dbformat_test: $(OBJ_DIR)/db/dbformat_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+uvl_log_format_test: $(OBJ_DIR)/db/dedup/uvl_log_format_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+uvl_file_builder_test: $(OBJ_DIR)/db/dedup/uvl_file_builder_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+uvl_file_addition_test: $(OBJ_DIR)/db/dedup/uvl_file_addition_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+uvl_file_reader_test: $(OBJ_DIR)/db/dedup/uvl_file_reader_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+cit_test: $(OBJ_DIR)/db/dedup/cit_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+cit_cold_tier_test: $(OBJ_DIR)/db/dedup/cit_cold_tier_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_work_queue_test: $(OBJ_DIR)/db/dedup/dedup_work_queue_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_options_test: $(OBJ_DIR)/db/dedup/dedup_options_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_context_test: $(OBJ_DIR)/db/dedup/dedup_context_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_gating_test: $(OBJ_DIR)/db/dedup/dedup_gating_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_flush_adapter_test: $(OBJ_DIR)/db/dedup/dedup_flush_adapter_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_flush_path_test: $(OBJ_DIR)/db/dedup/dedup_flush_path_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedup_offline_enqueue_test: $(OBJ_DIR)/db/dedup/dedup_offline_enqueue_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedupkv_integration_test: $(OBJ_DIR)/db/dedup/dedupkv_integration_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dgd_test: $(OBJ_DIR)/db/dedup/dgd_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+memory_monitor_test: $(OBJ_DIR)/db/dedup/memory_monitor_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+offline_dedup_test: $(OBJ_DIR)/db/dedup/offline_dedup_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+offline_dedup_worker_test: $(OBJ_DIR)/db/dedup/offline_dedup_worker_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+blob_index_dedup_test: $(OBJ_DIR)/db/dedup/blob_index_dedup_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 multi_cf_iterator_test: $(OBJ_DIR)/db/multi_cf_iterator_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1895,6 +1955,9 @@ sst_dump: $(OBJ_DIR)/tools/sst_dump.o $(TOOLS_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 blob_dump: $(OBJ_DIR)/tools/blob_dump.o $(TOOLS_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+dedupkv_driver: $(OBJ_DIR)/tools/dedupkv_driver/dedupkv_driver.o $(TOOLS_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 repair_test: $(OBJ_DIR)/db/repair_test.o $(TEST_LIBRARY) $(LIBRARY)

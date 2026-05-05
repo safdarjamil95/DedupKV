@@ -333,6 +333,17 @@ DECLARE_uint64(blob_cache_size);
 DECLARE_int32(blob_cache_numshardbits);
 DECLARE_int32(prepopulate_blob_cache);
 
+// ITEM-23: DedupKV stress coverage. Off by default; when enabled, the
+// stress harness opens its column families with `dedupkv.enable=true`
+// and the chosen mode. Verification accepts dedup'd storage as
+// equivalent because Get returns byte-identical values regardless of
+// whether they came from an SST inline value, a UVL record, or a
+// WAL replay through the offline drain.
+DECLARE_bool(enable_dedupkv);
+DECLARE_string(dedup_mode);
+DECLARE_uint32(dedup_chunk_threshold_bytes);
+DECLARE_double(dedup_memory_threshold_pct);
+
 DECLARE_int32(approximate_size_one_in);
 DECLARE_bool(best_efforts_recovery);
 DECLARE_bool(skip_verifydb);

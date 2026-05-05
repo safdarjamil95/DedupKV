@@ -321,6 +321,39 @@ static std::unordered_map<std::string, OptionTypeInfo>
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}}};
 
+// ITEM-11 DedupKVOptions nested type-info. `enable`, `mode`, and
+// `cold_tier_enabled` are immutable at CF level (frozen at open);
+// the remaining fields are runtime-tunable via SetOptions().
+static std::unordered_map<std::string, OptionTypeInfo>
+    dedupkv_options_type_info = {
+        {"enable",
+         {offsetof(struct DedupKVOptions, enable), OptionType::kBoolean,
+          OptionVerificationType::kNormal, OptionTypeFlags::kNone}},
+        {"mode",
+         OptionTypeInfo::Enum<DedupMode>(
+             offsetof(struct DedupKVOptions, mode),
+             &dedup_mode_string_map, OptionTypeFlags::kNone)},
+        {"memory_threshold_pct",
+         {offsetof(struct DedupKVOptions, memory_threshold_pct),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
+        {"chunk_threshold_bytes",
+         {offsetof(struct DedupKVOptions, chunk_threshold_bytes),
+          OptionType::kUInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
+        {"uvl_gc_threshold",
+         {offsetof(struct DedupKVOptions, uvl_gc_threshold),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
+        {"cold_tier_enabled",
+         {offsetof(struct DedupKVOptions, cold_tier_enabled),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"cit_checkpoint_every_flushes",
+         {offsetof(struct DedupKVOptions, cit_checkpoint_every_flushes),
+          OptionType::kUInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}}};
+
 static std::unordered_map<std::string, OptionTypeInfo>
     universal_compaction_options_type_info = {
         {"size_ratio",
@@ -642,6 +675,11 @@ static std::unordered_map<std::string, OptionTypeInfo>
          OptionTypeInfo::Enum<PrepopulateBlobCache>(
              offsetof(struct MutableCFOptions, prepopulate_blob_cache),
              &prepopulate_blob_cache_string_map, OptionTypeFlags::kMutable)},
+        {"dedupkv",
+         OptionTypeInfo::Struct(
+             "dedupkv", &dedupkv_options_type_info,
+             offsetof(struct MutableCFOptions, dedupkv),
+             OptionVerificationType::kNormal, OptionTypeFlags::kMutable)},
         {"sample_for_compression",
          {offsetof(struct MutableCFOptions, sample_for_compression),
           OptionType::kUInt64T, OptionVerificationType::kNormal,

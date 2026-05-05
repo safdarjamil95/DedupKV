@@ -42,6 +42,7 @@ class Mutex;
 class MemTableIterator;
 class MergeContext;
 class SystemClock;
+class DedupMemoryMonitor;  // db/dedup/memory_monitor.h — ITEM-15c
 
 struct ImmutableMemTableOptions {
   explicit ImmutableMemTableOptions(const ImmutableOptions& ioptions,
@@ -364,6 +365,16 @@ class ReadOnlyMemTable {
   // operations on the same MemTable.
   void SetNextLogNumber(uint64_t num) { mem_next_walfile_number_ = num; }
 
+  // ITEM-09c: the WAL file number this memtable writes to. Set once
+  // by DBImpl::SwitchMemtable when the MT is constructed (or rotated
+  // into immutable). Needed by FlushJob's offline branch to tell the
+  // DWQEntry exactly which WAL to drain — `GetNextLogNumber()-1` is
+  // *not* the right value because RocksDB's file-number pool is
+  // shared across WAL / MANIFEST / OPTIONS / SST, so subtracting by
+  // one lands on a non-WAL file.
+  uint64_t GetLogNumber() const { return mem_log_number_; }
+  void SetLogNumber(uint64_t num) { mem_log_number_ = num; }
+
   // REQUIRES: db_mutex held.
   void SetID(uint64_t id) { id_ = id; }
 
@@ -519,6 +530,9 @@ class ReadOnlyMemTable {
   // The log files earlier than this number can be deleted.
   uint64_t mem_next_walfile_number_{0};
 
+  // ITEM-09c: this memtable's own WAL file number. 0 = unset.
+  uint64_t mem_log_number_{0};
+
   // Memtable id to track flush.
   uint64_t id_ = 0;
 
@@ -551,16 +565,32 @@ class MemTable final : public ReadOnlyMemTable {
   // If the earliest sequence number is not known, kMaxSequenceNumber may be
   // used, but this may prevent some transactions from succeeding until the
   // first key is inserted into the memtable.
-  explicit MemTable(const InternalKeyComparator& comparator,
-                    const ImmutableOptions& ioptions,
-                    const MutableCFOptions& mutable_cf_options,
-                    WriteBufferManager* write_buffer_manager,
-                    SequenceNumber earliest_seq, uint32_t column_family_id);
+  //
+  // ITEM-15c: `dedup_memory_monitor` is the per-CF DedupMemoryMonitor
+  // (owned by DBImpl's DedupContext). When non-null, every successful
+  // Add charges the encoded entry size to the monitor and the
+  // destructor discharges the running total. Baseline RocksDB uses
+  // nullptr and pays no monitor overhead.
+  explicit MemTable(
+      const InternalKeyComparator& comparator,
+      const ImmutableOptions& ioptions,
+      const MutableCFOptions& mutable_cf_options,
+      WriteBufferManager* write_buffer_manager, SequenceNumber earliest_seq,
+      uint32_t column_family_id,
+      std::shared_ptr<DedupMemoryMonitor> dedup_memory_monitor = nullptr);
   // No copying allowed
   MemTable(const MemTable&) = delete;
   MemTable& operator=(const MemTable&) = delete;
 
   ~MemTable() override;
+
+  // ITEM-15c: late-bind the elastic-controller monitor. Must be called
+  // with the DB mutex held and before any concurrent writer has entered
+  // Add() on this MT. Used by DB::Open to wire the first post-recovery
+  // MT (which was constructed before the DedupContext existed).
+  void SetDedupMemoryMonitor(std::shared_ptr<DedupMemoryMonitor> monitor) {
+    dedup_memory_monitor_ = std::move(monitor);
+  }
 
   const char* Name() const override { return "MemTable"; }
 
@@ -902,6 +932,17 @@ class MemTable final : public ReadOnlyMemTable {
   // keep track of memory usage in table_, arena_, and range_del_table_.
   // Gets refreshed inside `ApproximateMemoryUsage()` or `ShouldFlushNow`
   RelaxedAtomic<uint64_t> approximate_memory_usage_;
+
+  // ITEM-15c: DedupKV elastic-controller hook. Non-null when this MT
+  // belongs to a CF with `dedupkv.enable=true`. Each successful Add
+  // charges its encoded length to the monitor; the destructor discharges
+  // the running total (tracked in monitor_charged_bytes_) so evicting
+  // the MT drops its contribution to utilization. Not const because
+  // DB::Open wires the monitor after CFD recovery has already
+  // constructed the first MT; the setter (below) is only called under
+  // the DB mutex before any concurrent writers exist.
+  std::shared_ptr<DedupMemoryMonitor> dedup_memory_monitor_;
+  RelaxedAtomic<uint64_t> monitor_charged_bytes_{0};
 
   // max range deletions in a memtable,  before automatic flushing, 0 for
   // unlimited.

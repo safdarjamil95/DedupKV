@@ -71,6 +71,25 @@ cpp_library_wrapper(name="rocksdb_lib", srcs=[
         "db/db_info_dumper.cc",
         "db/db_iter.cc",
         "db/dbformat.cc",
+        "db/dedup/cit.cc",
+        "db/dedup/cit_cold_tier.cc",
+        "db/dedup/dedup_context.cc",
+        "db/dedup/dedup_flush_adapter.cc",
+        "db/dedup/dedup_offline_enqueue.cc",
+        "db/dedup/dedup_work_queue.cc",
+        "db/dedup/dgd.cc",
+        "db/dedup/memory_monitor.cc",
+        "db/dedup/offline_dedup.cc",
+        "db/dedup/offline_dedup_install_sink.cc",
+        "db/dedup/offline_dedup_wal_decoder.cc",
+        "db/dedup/offline_dedup_worker.cc",
+        "db/dedup/uvl_file_addition.cc",
+        "db/dedup/uvl_file_builder.cc",
+        "db/dedup/uvl_file_garbage.cc",
+        "db/dedup/uvl_file_reader.cc",
+        "db/dedup/uvl_garbage_meter.cc",
+        "db/dedup/uvl_gc.cc",
+        "db/dedup/uvl_log_format.cc",
         "db/error_handler.cc",
         "db/event_helpers.cc",
         "db/experimental.cc",
@@ -275,6 +294,7 @@ cpp_library_wrapper(name="rocksdb_lib", srcs=[
         "util/random.cc",
         "util/rate_limiter.cc",
         "util/ribbon_config.cc",
+        "util/sha1.cc",
         "util/simple_mixed_compressor.cc",
         "util/slice.cc",
         "util/status.cc",
@@ -458,6 +478,8 @@ cpp_binary_wrapper(name="ldb", srcs=["tools/ldb.cc"], deps=[":rocksdb_tools_lib"
 cpp_binary_wrapper(name="db_stress", srcs=["db_stress_tool/db_stress.cc"], deps=[":rocksdb_stress_lib"], extra_preprocessor_flags=[], extra_bench_libs=False)
 
 cpp_binary_wrapper(name="db_bench", srcs=["tools/db_bench.cc"], deps=[":rocksdb_tools_lib"], extra_preprocessor_flags=[], extra_bench_libs=False)
+
+cpp_binary_wrapper(name="dedupkv_driver", srcs=["tools/dedupkv_driver/dedupkv_driver.cc"], deps=[":rocksdb_tools_lib"], extra_preprocessor_flags=[], extra_bench_libs=False)
 
 cpp_binary_wrapper(name="cache_bench", srcs=["cache/cache_bench.cc"], deps=[":rocksdb_cache_bench_tools_lib"], extra_preprocessor_flags=[], extra_bench_libs=False)
 
@@ -4552,6 +4574,12 @@ cpp_unittest_wrapper(name="blob_garbage_meter_test",
             extra_compiler_flags=[])
 
 
+cpp_unittest_wrapper(name="blob_index_dedup_test",
+            srcs=["db/dedup/blob_index_dedup_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
 cpp_unittest_wrapper(name="blob_source_test",
             srcs=["db/blob/blob_source_test.cc"],
             deps=[":rocksdb_test_lib"],
@@ -4638,6 +4666,18 @@ cpp_unittest_wrapper(name="cassandra_serialize_test",
 
 cpp_unittest_wrapper(name="checkpoint_test",
             srcs=["utilities/checkpoint/checkpoint_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="cit_cold_tier_test",
+            srcs=["db/dedup/cit_cold_tier_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="cit_test",
+            srcs=["db/dedup/cit_test.cc"],
             deps=[":rocksdb_test_lib"],
             extra_compiler_flags=[])
 
@@ -5062,6 +5102,54 @@ cpp_unittest_wrapper(name="dbformat_test",
             extra_compiler_flags=[])
 
 
+cpp_unittest_wrapper(name="dedup_context_test",
+            srcs=["db/dedup/dedup_context_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedup_flush_adapter_test",
+            srcs=["db/dedup/dedup_flush_adapter_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedup_flush_path_test",
+            srcs=["db/dedup/dedup_flush_path_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedup_gating_test",
+            srcs=["db/dedup/dedup_gating_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedup_offline_enqueue_test",
+            srcs=["db/dedup/dedup_offline_enqueue_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedup_options_test",
+            srcs=["db/dedup/dedup_options_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedup_work_queue_test",
+            srcs=["db/dedup/dedup_work_queue_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dedupkv_integration_test",
+            srcs=["db/dedup/dedupkv_integration_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
 cpp_unittest_wrapper(name="defer_test",
             srcs=["util/defer_test.cc"],
             deps=[":rocksdb_test_lib"],
@@ -5076,6 +5164,12 @@ cpp_unittest_wrapper(name="delete_scheduler_test",
 
 cpp_unittest_wrapper(name="deletefile_test",
             srcs=["db/deletefile_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="dgd_test",
+            srcs=["db/dedup/dgd_test.cc"],
             deps=[":rocksdb_test_lib"],
             extra_compiler_flags=[])
 
@@ -5298,6 +5392,12 @@ cpp_unittest_wrapper(name="memory_allocator_test",
             extra_compiler_flags=[])
 
 
+cpp_unittest_wrapper(name="memory_monitor_test",
+            srcs=["db/dedup/memory_monitor_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
 cpp_unittest_wrapper(name="memory_test",
             srcs=["utilities/memory/memory_test.cc"],
             deps=[":rocksdb_test_lib"],
@@ -5348,6 +5448,18 @@ cpp_unittest_wrapper(name="object_registry_test",
 
 cpp_unittest_wrapper(name="obsolete_files_test",
             srcs=["db/obsolete_files_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="offline_dedup_test",
+            srcs=["db/dedup/offline_dedup_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="offline_dedup_worker_test",
+            srcs=["db/dedup/offline_dedup_worker_test.cc"],
             deps=[":rocksdb_test_lib"],
             extra_compiler_flags=[])
 
@@ -5504,6 +5616,12 @@ cpp_unittest_wrapper(name="ribbon_test",
 
 cpp_unittest_wrapper(name="seqno_time_test",
             srcs=["db/seqno_time_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="sha1_test",
+            srcs=["util/sha1_test.cc"],
             deps=[":rocksdb_test_lib"],
             extra_compiler_flags=[])
 
@@ -5666,6 +5784,30 @@ cpp_unittest_wrapper(name="udt_util_test",
 
 cpp_unittest_wrapper(name="util_merge_operators_test",
             srcs=["utilities/util_merge_operators_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="uvl_file_addition_test",
+            srcs=["db/dedup/uvl_file_addition_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="uvl_file_builder_test",
+            srcs=["db/dedup/uvl_file_builder_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="uvl_file_reader_test",
+            srcs=["db/dedup/uvl_file_reader_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="uvl_log_format_test",
+            srcs=["db/dedup/uvl_log_format_test.cc"],
             deps=[":rocksdb_test_lib"],
             extra_compiler_flags=[])
 

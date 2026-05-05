@@ -550,6 +550,21 @@ DEFINE_int32(prepopulate_blob_cache, 0,
              "[Integrated BlobDB] Pre-populate hot/warm blobs in blob cache. 0 "
              "to disable and 1 to insert during flush.");
 
+// ITEM-23: DedupKV stress flags.
+DEFINE_bool(enable_dedupkv, false,
+            "[DedupKV] Open column families with dedupkv.enable=true. "
+            "Mutually exclusive with --enable_blob_files (DedupKV uses "
+            "the UVL log instead of native blob files).");
+DEFINE_string(dedup_mode, "elastic",
+              "[DedupKV] Dedup mode: 'inline', 'offline', or 'elastic'.");
+DEFINE_uint32(dedup_chunk_threshold_bytes, 64,
+              "[DedupKV] Values >= this size go through SHA1+CIT large "
+              "branch; values < this go through inline LZ4 small branch.");
+DEFINE_double(dedup_memory_threshold_pct, 0.5,
+              "[DedupKV] Elastic memory threshold (0.0 .. 1.0). When the "
+              "active memtable utilisation exceeds this, elastic mode "
+              "switches to offline drain.");
+
 DEFINE_int64(preclude_last_level_data_seconds, 0,
              "Preclude data from the last level. Used with tiered storage "
              "feature to preclude new data from comacting to the last level.");

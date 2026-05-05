@@ -40,6 +40,9 @@
 #include <unordered_map>
 
 #include "db/db_impl/db_impl.h"
+#include "db/dedup/cit.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/dgd.h"
 #include "db/malloc_stats.h"
 #include "db/version_set.h"
 #include "monitoring/histogram.h"
@@ -1137,6 +1140,33 @@ DEFINE_int32(
     blob_file_starting_level,
     ROCKSDB_NAMESPACE::AdvancedColumnFamilyOptions().blob_file_starting_level,
     "[Integrated BlobDB] The starting level for blob files.");
+
+// ITEM-21: DedupKV options. Mutually exclusive with --enable_blob_files
+// at the CF-options level — dedup CFs must use UVL storage, not the
+// native blob file path (ITEM-13 disables native blob GC).
+DEFINE_bool(enable_dedupkv, false,
+            "[DedupKV] Enable DedupKV (UVL-backed value dedup).");
+
+DEFINE_string(dedup_mode, "elastic",
+              "[DedupKV] {inline, offline, elastic} — paper's DKV(In), "
+              "DKV(Off), DedupKV ablations.");
+
+DEFINE_uint32(dedup_chunk_threshold_bytes,
+              ROCKSDB_NAMESPACE::DedupKVOptions().chunk_threshold_bytes,
+              "[DedupKV] Value-size threshold. Values >= this go through "
+              "SHA1 + CIT dedup; values < this go through LZ4 inline "
+              "small-branch.");
+
+DEFINE_double(dedup_memory_threshold_pct,
+              ROCKSDB_NAMESPACE::DedupKVOptions().memory_threshold_pct,
+              "[DedupKV] Elastic controller threshold: when MT+IMT "
+              "utilization crosses this ratio, flushes take the offline "
+              "path.");
+
+DEFINE_double(dedup_uvl_gc_threshold,
+              ROCKSDB_NAMESPACE::DedupKVOptions().uvl_gc_threshold,
+              "[DedupKV] Per-UVL invalid/total ratio that triggers auto "
+              "GC. Set >= 1.0 to disable auto-GC.");
 
 DEFINE_bool(use_blob_cache, false, "[Integrated BlobDB] Enable blob cache.");
 
@@ -4077,6 +4107,51 @@ class Benchmark {
     if (FLAGS_statistics) {
       fprintf(stdout, "STATISTICS:\n%s\n", dbstats->ToString().c_str());
     }
+
+    // ITEM-21: DedupKV end-of-run stats (CIT size + hit/miss counters,
+    // DGD per-branch counters, UVL file count + total bytes on disk).
+    if (FLAGS_enable_dedupkv && db_.db != nullptr) {
+      auto* impl = static_cast_with_check<DBImpl>(db_.db->GetRootDB());
+      std::vector<ColumnFamilyHandle*> handles;
+      if (db_.cfh.empty()) {
+        handles.push_back(db_.db->DefaultColumnFamily());
+      } else {
+        handles = db_.cfh;
+      }
+      fprintf(stdout, "DEDUPKV STATISTICS:\n");
+      for (auto* h : handles) {
+        if (h == nullptr) continue;
+        auto ctx = impl->GetDedupContext(h->GetID());
+        if (!ctx) continue;
+        const uint64_t cit_size = ctx->cit ? ctx->cit->Size() : 0;
+        const uint64_t cit_hits = ctx->cit ? ctx->cit->Hits() : 0;
+        const uint64_t cit_misses = ctx->cit ? ctx->cit->Misses() : 0;
+        const DGDStats* dgd = ctx->dgd_stats.get();
+        const uint64_t dgd_hits = dgd ? dgd->dedup_hits.load() : 0;
+        const uint64_t dgd_misses = dgd ? dgd->dedup_misses.load() : 0;
+        const uint64_t dgd_small = dgd ? dgd->small_value_lz4.load() : 0;
+        const uint64_t dgd_orph = dgd ? dgd->orphaned_uvl_bytes.load() : 0;
+        const uint64_t lz4_in = dgd ? dgd->lz4_input_bytes.load() : 0;
+        const uint64_t lz4_out = dgd ? dgd->lz4_compressed_bytes.load() : 0;
+        const auto sizes = ctx->SnapshotUvlFileSizes();
+        uint64_t total_uvl_bytes = 0;
+        for (const auto& kv : sizes) total_uvl_bytes += kv.second;
+        fprintf(stdout,
+                "  cf=%s id=%u\n"
+                "    cit_size=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 "\n"
+                "    dgd_hits=%" PRIu64 " dgd_misses=%" PRIu64
+                " small_lz4=%" PRIu64 " orphaned_uvl_bytes=%" PRIu64 "\n"
+                "    lz4_in=%" PRIu64 " lz4_out=%" PRIu64 " (ratio=%.3f)\n"
+                "    live_uvl_files=%zu total_uvl_bytes=%" PRIu64 "\n",
+                h->GetName().c_str(), h->GetID(), cit_size, cit_hits,
+                cit_misses, dgd_hits, dgd_misses, dgd_small, dgd_orph, lz4_in,
+                lz4_out,
+                lz4_in == 0 ? 0.0
+                            : static_cast<double>(lz4_out) /
+                                  static_cast<double>(lz4_in),
+                sizes.size(), total_uvl_bytes);
+      }
+    }
     if (FLAGS_simcache_size >= 0) {
       fprintf(
           stdout, "SIMULATOR CACHE STATISTICS:\n%s\n",
@@ -4994,6 +5069,35 @@ class Benchmark {
     options.blob_compaction_readahead_size =
         FLAGS_blob_compaction_readahead_size;
     options.blob_file_starting_level = FLAGS_blob_file_starting_level;
+
+    // ITEM-21: DedupKV wiring.
+    if (FLAGS_enable_dedupkv) {
+      options.dedupkv.enable = true;
+      if (FLAGS_dedup_mode == "inline") {
+        options.dedupkv.mode = DedupMode::kInlineOnly;
+      } else if (FLAGS_dedup_mode == "offline") {
+        options.dedupkv.mode = DedupMode::kOfflineOnly;
+      } else if (FLAGS_dedup_mode == "elastic") {
+        options.dedupkv.mode = DedupMode::kElastic;
+      } else {
+        fprintf(stderr,
+                "Unknown --dedup_mode '%s' (expected inline/offline/elastic)\n",
+                FLAGS_dedup_mode.c_str());
+        db_bench_exit(1);
+      }
+      options.dedupkv.chunk_threshold_bytes = FLAGS_dedup_chunk_threshold_bytes;
+      options.dedupkv.memory_threshold_pct = FLAGS_dedup_memory_threshold_pct;
+      options.dedupkv.uvl_gc_threshold = FLAGS_dedup_uvl_gc_threshold;
+      // ITEM-13 disables native blob GC under dedup, but we also need to
+      // make sure --enable_blob_files isn't simultaneously set, because
+      // DedupFlushAdapter replaces BlobFileBuilder on the flush path.
+      if (FLAGS_enable_blob_files) {
+        fprintf(stderr,
+                "--enable_dedupkv is mutually exclusive with "
+                "--enable_blob_files\n");
+        db_bench_exit(1);
+      }
+    }
 
     if (FLAGS_readonly && FLAGS_transaction_db) {
       fprintf(stderr, "Cannot use readonly flag with transaction_db\n");

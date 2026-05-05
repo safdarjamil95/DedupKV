@@ -31,6 +31,7 @@ const std::string kTempFileNameSuffix = "dbtmp";
 static const std::string kRocksDbTFileExt = "sst";
 static const std::string kLevelDbTFileExt = "ldb";
 static const std::string kRocksDBBlobFileExt = "blob";
+static const std::string kRocksDBUvlFileExt = "uvl";
 static const std::string kArchivalDirName = "archive";
 
 // Given a path, flatten the path name by replacing all chars not in
@@ -100,6 +101,16 @@ std::string BlobFileName(const std::string& dbname, const std::string& blob_dir,
   assert(number > 0);
   return MakeFileName(dbname + "/" + blob_dir, number,
                       kRocksDBBlobFileExt.c_str());
+}
+
+std::string UvlFileName(uint64_t number) {
+  assert(number > 0);
+  return MakeFileName(number, kRocksDBUvlFileExt.c_str());
+}
+
+std::string UvlFileName(const std::string& uvl_dir, uint64_t number) {
+  assert(number > 0);
+  return MakeFileName(uvl_dir, number, kRocksDBUvlFileExt.c_str());
 }
 
 std::string ArchivalDirectory(const std::string& dir) {
@@ -280,7 +291,7 @@ std::string IdentityFileName(const std::string& dbname) {
 //    dbname/<info_log_name_prefix>
 //    dbname/<info_log_name_prefix>.old.[0-9]+
 //    dbname/MANIFEST-[0-9]+
-//    dbname/[0-9]+.(log|sst|blob)
+//    dbname/[0-9]+.(log|sst|blob|uvl)
 //    dbname/METADB-[0-9]+
 //    dbname/OPTIONS-[0-9]+
 //    dbname/OPTIONS-[0-9]+.dbtmp
@@ -416,6 +427,8 @@ bool ParseFileName(const std::string& fname, uint64_t* number,
       *type = kTableFile;
     } else if (suffix == Slice(kRocksDBBlobFileExt)) {
       *type = kBlobFile;
+    } else if (suffix == Slice(kRocksDBUvlFileExt)) {
+      *type = kUvlFile;
     } else if (suffix == Slice(kTempFileNameSuffix)) {
       *type = kTempFile;
     } else {

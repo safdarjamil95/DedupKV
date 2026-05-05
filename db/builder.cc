@@ -15,6 +15,7 @@
 
 #include "db/blob/blob_file_builder.h"
 #include "db/compaction/compaction_iterator.h"
+#include "db/dedup/dedup_flush_adapter.h"
 #include "db/dbformat.h"
 #include "db/event_helpers.h"
 #include "db/internal_stats.h"
@@ -87,7 +88,8 @@ Status BuildTable(
     Env::WriteLifeTimeHint write_hint, const std::string* full_history_ts_low,
     BlobFileCompletionCallback* blob_callback, Version* version,
     uint64_t* memtable_payload_bytes, uint64_t* memtable_garbage_bytes,
-    InternalStats::CompactionStats* flush_stats) {
+    InternalStats::CompactionStats* flush_stats,
+    DedupFlushAdapter* dedup_adapter) {
   assert((tboptions.column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          tboptions.column_family_name.empty());
@@ -224,6 +226,8 @@ Status BuildTable(
     SequenceNumber smallest_preferred_seqno = kMaxSequenceNumber;
     std::string key_after_flush_buf;
     std::string value_buf;
+    std::string dedup_key_buf;
+    std::string dedup_value_buf;
     c_iter.SeekToFirst();
     for (; c_iter.Valid(); c_iter.Next()) {
       const Slice& key = c_iter.key();
@@ -253,6 +257,25 @@ Status BuildTable(
           key_after_flush = key_after_flush_buf;
           value_after_flush = ParsePackedValueForValue(value);
         }
+      }
+
+      // ITEM-14c: DedupKV inline path. For kTypeValue entries, route the
+      // value through the dedup adapter (DGD + UVL append) and swap the
+      // SST payload for a kDedupKVUvl BlobIndex. All other ValueTypes
+      // (deletions, range tombstones, pre-existing BlobIndex, etc.) pass
+      // through unchanged.
+      if (dedup_adapter != nullptr && ikey.type == kTypeValue) {
+        dedup_value_buf.clear();
+        s = dedup_adapter->Add(ikey.user_key, value_after_flush,
+                               &dedup_value_buf);
+        if (!s.ok()) {
+          break;
+        }
+        dedup_key_buf.assign(key_after_flush.data(), key_after_flush.size());
+        UpdateInternalKey(&dedup_key_buf, ikey.sequence, kTypeBlobIndex);
+        ikey = ParsedInternalKey(ikey.user_key, ikey.sequence, kTypeBlobIndex);
+        key_after_flush = dedup_key_buf;
+        value_after_flush = dedup_value_buf;
       }
 
       //  Generate a rolling 64-bit hash of the key and values
@@ -446,6 +469,20 @@ Status BuildTable(
         blob_file_builder->Abandon(s);
       }
       blob_file_builder.reset();
+    }
+
+    // ITEM-14c: finish the UVL alongside the SST. On any earlier failure
+    // (including empty output) Abandon the writer; the caller is
+    // responsible for unlinking the partial UVL file.
+    if (dedup_adapter != nullptr) {
+      if (s.ok() && !empty) {
+        Status uvl_s = dedup_adapter->Finish(db_options.use_fsync);
+        if (!uvl_s.ok()) {
+          s = uvl_s;
+        }
+      } else {
+        dedup_adapter->Abandon();
+      }
     }
 
     // TODO Also check the IO status when create the Iterator.

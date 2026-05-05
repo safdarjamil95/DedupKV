@@ -234,6 +234,12 @@ def generate_buck(repo_path, deps_map):
     BUCK.add_binary(
         "db_bench", ["tools/db_bench.cc"], [":rocksdb_tools_lib"]
     )
+    # ITEM-22: dedupkv_driver binary
+    BUCK.add_binary(
+        "dedupkv_driver",
+        ["tools/dedupkv_driver/dedupkv_driver.cc"],
+        [":rocksdb_tools_lib"],
+    )
     # cache_bench binary
     BUCK.add_binary(
         "cache_bench", ["cache/cache_bench.cc"], [":rocksdb_cache_bench_tools_lib"]

@@ -38,6 +38,8 @@ class VersionSet;
 class VersionStorageInfo;
 class MemTable;
 class MemTableListVersion;
+class DedupMemoryMonitor;  // db/dedup/memory_monitor.h — ITEM-15c
+struct DedupContext;        // db/dedup/dedup_context.h — ITEM-17
 class CompactionPicker;
 class Compaction;
 class InternalKey;
@@ -412,6 +414,28 @@ class ColumnFamilyData {
                                  SequenceNumber earliest_seq);
   void CreateNewMemtable(SequenceNumber earliest_seq);
 
+  // ITEM-15c: wire the per-CF DedupMemoryMonitor so every subsequently
+  // constructed MemTable charges the elastic-controller counter. Must
+  // be called with the DB mutex held (matches the SuperVersion /
+  // memtable rotation discipline). Passing nullptr detaches. Cascades
+  // to the currently-active MemTable so writes entering after this
+  // point are counted even when the first MT was built pre-wiring
+  // during VersionSet recovery.
+  void SetDedupMemoryMonitor(std::shared_ptr<DedupMemoryMonitor> monitor);
+  const std::shared_ptr<DedupMemoryMonitor>& dedup_memory_monitor() const {
+    return dedup_memory_monitor_;
+  }
+
+  // ITEM-17: stashes the full DedupContext so CompactionIterator can
+  // reach the CIT (for refcount decrements) without plumbing another
+  // ctor arg through the compaction job. Set by DBImpl::Open.
+  void SetDedupContext(std::shared_ptr<DedupContext> ctx) {
+    dedup_context_ = std::move(ctx);
+  }
+  const std::shared_ptr<DedupContext>& dedup_context() const {
+    return dedup_context_;
+  }
+
   TableCache* table_cache() const { return table_cache_.get(); }
   BlobFileCache* blob_file_cache() const { return blob_file_cache_.get(); }
   BlobSource* blob_source() const { return blob_source_.get(); }
@@ -652,6 +676,14 @@ class ColumnFamilyData {
   std::unique_ptr<InternalStats> internal_stats_;
 
   WriteBufferManager* write_buffer_manager_;
+
+  // ITEM-15c: DedupKV elastic-controller signal source. Null for CFs
+  // with dedupkv.enable=false.
+  std::shared_ptr<DedupMemoryMonitor> dedup_memory_monitor_;
+
+  // ITEM-17: shared pointer to the DB-level DedupContext for this CF.
+  // CompactionIterator uses this to DecRefcount on dropped dedup keys.
+  std::shared_ptr<DedupContext> dedup_context_;
 
   MemTable* mem_;
   MemTableList imm_;

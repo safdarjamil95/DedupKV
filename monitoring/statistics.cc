@@ -296,6 +296,14 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {PREFETCH_MEMORY_BYTES_RELEASED, "rocksdb.prefetch.memory.bytes.released"},
     {PREFETCH_MEMORY_REQUESTS_BLOCKED,
      "rocksdb.prefetch.memory.requests.blocked"},
+    {DEDUPKV_INLINE_OPS, "rocksdb.dedupkv.inline.ops"},
+    {DEDUPKV_OFFLINE_OPS, "rocksdb.dedupkv.offline.ops"},
+    {DEDUPKV_DUPLICATE_HITS, "rocksdb.dedupkv.duplicate.hits"},
+    {DEDUPKV_DUPLICATE_MISSES, "rocksdb.dedupkv.duplicate.misses"},
+    {DEDUPKV_UVL_BYTES_WRITTEN, "rocksdb.dedupkv.uvl.bytes.written"},
+    {DEDUPKV_UVL_GC_BYTES_REWRITTEN, "rocksdb.dedupkv.uvl.gc.bytes.rewritten"},
+    {DEDUPKV_UVL_ORPHANED_BYTES, "rocksdb.dedupkv.uvl.orphaned.bytes"},
+    {DEDUPKV_DWQ_BF_HITS, "rocksdb.dedupkv.dwq.bf.hits"},
 };
 
 const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {
@@ -373,6 +381,12 @@ const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {
     {MULTISCAN_PREPARE_MICROS, "rocksdb.multiscan.prepare.micros"},
     {MULTISCAN_BLOCKS_PER_PREPARE, "rocksdb.multiscan.blocks.per.prepare"},
     {BLOCK_KEY_DISTRIBUTION_CV, "rocksdb.block.key.distribution.cv"},
+    {DEDUPKV_LZ4_COMPRESS_MICROS, "rocksdb.dedupkv.lz4.compress.micros"},
+    {DEDUPKV_SHA1_MICROS, "rocksdb.dedupkv.sha1.micros"},
+    {DEDUPKV_CIT_LOOKUP_MICROS, "rocksdb.dedupkv.cit.lookup.micros"},
+    {DEDUPKV_BF_LOOKUP_MICROS, "rocksdb.dedupkv.bf.lookup.micros"},
+    {DEDUPKV_BF_CREATE_MICROS, "rocksdb.dedupkv.bf.create.micros"},
+    {DEDUPKV_UVL_WRITE_MICROS, "rocksdb.dedupkv.uvl.write.micros"},
 };
 
 std::shared_ptr<Statistics> CreateDBStatistics() {

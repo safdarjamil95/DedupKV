@@ -17,6 +17,8 @@
 
 #include "db/blob/blob_file_addition.h"
 #include "db/blob/blob_file_garbage.h"
+#include "db/dedup/uvl_file_addition.h"
+#include "db/dedup/uvl_file_garbage.h"
 #include "db/dbformat.h"
 #include "db/wal_edit.h"
 #include "memory/arena.h"
@@ -59,6 +61,15 @@ enum Tag : uint32_t {
 
   kBlobFileAddition = 400,
   kBlobFileGarbage,
+
+  // DedupKV (ITEM-14b). MANDATORY (below kTagSafeIgnoreMask): an old
+  // RocksDB binary that opens a DedupKV-bearing MANIFEST must fail
+  // explicitly rather than silently lose UVL files.
+  kUvlFileAddition = 402,
+
+  // DedupKV (ITEM-18b) UVL GC record. Also MANDATORY so an old binary
+  // can't silently miss a rewrite.
+  kUvlFileGarbage = 403,
 
   // Mask for an unidentified tag from the future which can be safely ignored.
   kTagSafeIgnoreMask = 1 << 13,
@@ -903,6 +914,66 @@ class VersionEdit {
     blob_file_garbages_ = std::move(blob_file_garbages);
   }
 
+  // ---- DedupKV (ITEM-14b) ----
+
+  // Add a UVL file installation record. The VersionEdit is then
+  // applied via VersionSet::LogAndApply alongside any new SSTs the
+  // same flush produced (ITEM-14c will own that wiring).
+  void AddUvlFile(uint64_t uvl_file_number, uint32_t column_family_id,
+                  uint64_t total_uvl_records, uint64_t total_uvl_bytes,
+                  uint64_t creation_time) {
+    uvl_file_additions_.emplace_back(uvl_file_number, column_family_id,
+                                     total_uvl_records, total_uvl_bytes,
+                                     creation_time);
+    files_to_quarantine_.push_back(uvl_file_number);
+  }
+
+  void AddUvlFile(UvlFileAddition uvl_file_addition) {
+    uvl_file_additions_.emplace_back(std::move(uvl_file_addition));
+    files_to_quarantine_.push_back(
+        uvl_file_additions_.back().GetUvlFileNumber());
+  }
+
+  using UvlFileAdditions = std::vector<UvlFileAddition>;
+  const UvlFileAdditions& GetUvlFileAdditions() const {
+    return uvl_file_additions_;
+  }
+
+  void SetUvlFileAdditions(UvlFileAdditions uvl_file_additions) {
+    assert(uvl_file_additions_.empty());
+    uvl_file_additions_ = std::move(uvl_file_additions);
+    for (const auto& uvl : uvl_file_additions_) {
+      files_to_quarantine_.push_back(uvl.GetUvlFileNumber());
+    }
+  }
+
+  // ITEM-18b: record that a UVL file has been rewritten (either into
+  // `new_uvl_file_number` or dropped entirely when that number is 0).
+  // The tag is mandatory in the MANIFEST so old binaries fail-loud.
+  void AddUvlFileGarbage(uint64_t old_uvl_file_number,
+                         uint64_t new_uvl_file_number,
+                         uint32_t column_family_id,
+                         uint64_t live_records_copied,
+                         uint64_t live_bytes_copied) {
+    uvl_file_garbages_.emplace_back(old_uvl_file_number, new_uvl_file_number,
+                                    column_family_id, live_records_copied,
+                                    live_bytes_copied);
+  }
+
+  void AddUvlFileGarbage(UvlFileGarbage uvl_file_garbage) {
+    uvl_file_garbages_.emplace_back(std::move(uvl_file_garbage));
+  }
+
+  using UvlFileGarbages = std::vector<UvlFileGarbage>;
+  const UvlFileGarbages& GetUvlFileGarbages() const {
+    return uvl_file_garbages_;
+  }
+
+  void SetUvlFileGarbages(UvlFileGarbages uvl_file_garbages) {
+    assert(uvl_file_garbages_.empty());
+    uvl_file_garbages_ = std::move(uvl_file_garbages);
+  }
+
   // Add a WAL (either just created or closed).
   // AddWal and DeleteWalsBefore cannot be called on the same VersionEdit.
   void AddWal(WalNumber number, WalMetadata metadata = WalMetadata()) {
@@ -936,6 +1007,7 @@ class VersionEdit {
   size_t NumEntries() const {
     return new_files_.size() + deleted_files_.size() +
            blob_file_additions_.size() + blob_file_garbages_.size() +
+           uvl_file_additions_.size() + uvl_file_garbages_.size() +
            wal_additions_.size() + !wal_deletion_.IsEmpty();
   }
 
@@ -1077,6 +1149,12 @@ class VersionEdit {
 
   BlobFileAdditions blob_file_additions_;
   BlobFileGarbages blob_file_garbages_;
+
+  // ITEM-14b: DedupKV UVL file installations.
+  UvlFileAdditions uvl_file_additions_;
+
+  // ITEM-18b: DedupKV UVL files that have been rewritten by GC.
+  UvlFileGarbages uvl_file_garbages_;
 
   WalAdditions wal_additions_;
   WalDeletion wal_deletion_;

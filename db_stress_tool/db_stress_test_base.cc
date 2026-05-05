@@ -2687,6 +2687,11 @@ Status StressTest::TestBackupRestore(
 }
 
 void InitializeMergeOperator(Options& options) {
+  // ITEM-23: DedupKV gates merge operators (per ITEM-13). Stress runs
+  // with --enable_dedupkv leave merge_operator nullptr.
+  if (FLAGS_enable_dedupkv) {
+    return;
+  }
   if (FLAGS_use_full_merge_v1) {
     options.merge_operator = MergeOperators::CreateDeprecatedPutOperator();
   } else {
@@ -4543,6 +4548,28 @@ void InitializeOptionsFromFlags(
       FLAGS_memtable_veirfy_per_key_checksum_on_seek;
   options.memtable_batch_lookup_optimization =
       FLAGS_memtable_batch_lookup_optimization;
+
+  // ITEM-23: DedupKV stress coverage. When enabled, DedupKV opens
+  // its own UVL log + DGD pipeline; mutually exclusive with native
+  // BlobDB so we leave enable_blob_files at the default.
+  if (FLAGS_enable_dedupkv) {
+    options.dedupkv.enable = true;
+    if (FLAGS_dedup_mode == "inline") {
+      options.dedupkv.mode = DedupMode::kInlineOnly;
+    } else if (FLAGS_dedup_mode == "offline") {
+      options.dedupkv.mode = DedupMode::kOfflineOnly;
+    } else if (FLAGS_dedup_mode == "elastic") {
+      options.dedupkv.mode = DedupMode::kElastic;
+    } else {
+      fprintf(stderr,
+              "Unknown --dedup_mode: '%s' (use inline|offline|elastic)\n",
+              FLAGS_dedup_mode.c_str());
+      exit(1);
+    }
+    options.dedupkv.chunk_threshold_bytes =
+        FLAGS_dedup_chunk_threshold_bytes;
+    options.dedupkv.memory_threshold_pct = FLAGS_dedup_memory_threshold_pct;
+  }
 
   // Integrated BlobDB
   options.enable_blob_files = FLAGS_enable_blob_files;

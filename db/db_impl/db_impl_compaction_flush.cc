@@ -11,6 +11,7 @@
 
 #include "db/builder.h"
 #include "db/db_impl/db_impl.h"
+#include "db/dedup/dedup_context.h"
 #include "db/error_handler.h"
 #include "db/event_helpers.h"
 #include "file/file_util.h"
@@ -206,6 +207,15 @@ Status DBImpl::FlushMemTableToOutputFile(
   // To address this, we make sure NotifyOnFlushBegin() executes after memtable
   // picking so that no new snapshot can be taken between the two functions.
 
+  // ITEM-14c: hand the per-CF DedupContext to the flush job (nullptr for
+  // non-dedup CFs) so WriteLevel0Table can take the inline DedupKV path.
+  std::shared_ptr<DedupContext> flush_dedup_context;
+  {
+    auto it = dedup_contexts_.find(cfd->GetID());
+    if (it != dedup_contexts_.end()) {
+      flush_dedup_context = it->second;
+    }
+  }
   FlushJob flush_job(
       dbname_, cfd, immutable_db_options_, mutable_cf_options, max_memtable_id,
       file_options_for_compaction_, versions_.get(), &mutex_, &shutting_down_,
@@ -215,7 +225,8 @@ Status DBImpl::FlushMemTableToOutputFile(
       &event_logger_, mutable_cf_options.report_bg_io_stats,
       true /* sync_output_directory */, true /* write_manifest */, thread_pri,
       io_tracer_, cfd->GetSuperVersion()->ShareSeqnoToTimeMapping(), db_id_,
-      db_session_id_, cfd->GetFullHistoryTsLow(), &blob_callback_);
+      db_session_id_, cfd->GetFullHistoryTsLow(), &blob_callback_,
+      std::move(flush_dedup_context));
   FileMetaData file_meta;
 
   Status s;
@@ -476,6 +487,14 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
     const MutableCFOptions& mutable_cf_options = all_mutable_cf_options.back();
     uint64_t max_memtable_id = bg_flush_args[i].max_memtable_id_;
     FlushReason flush_reason = bg_flush_args[i].flush_reason_;
+    // ITEM-14c: same DedupContext hand-off for the atomic-flush path.
+    std::shared_ptr<DedupContext> atomic_flush_dedup_context;
+    {
+      auto dc_it = dedup_contexts_.find(cfd->GetID());
+      if (dc_it != dedup_contexts_.end()) {
+        atomic_flush_dedup_context = dc_it->second;
+      }
+    }
     jobs.emplace_back(new FlushJob(
         dbname_, cfd, immutable_db_options_, mutable_cf_options,
         max_memtable_id, file_options_for_compaction_, versions_.get(), &mutex_,
@@ -486,7 +505,8 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
         false /* sync_output_directory */, false /* write_manifest */,
         thread_pri, io_tracer_,
         cfd->GetSuperVersion()->ShareSeqnoToTimeMapping(), db_id_,
-        db_session_id_, cfd->GetFullHistoryTsLow(), &blob_callback_));
+        db_session_id_, cfd->GetFullHistoryTsLow(), &blob_callback_,
+        std::move(atomic_flush_dedup_context)));
   }
 
   std::vector<FileMetaData> file_meta(num_cfs);
@@ -4530,6 +4550,17 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     if (status.ok()) {
       InstallSuperVersionAndScheduleWork(
           c->column_family_data(), job_context->superversion_contexts.data());
+      // ITEM-18f: fire the UVL GC scheduler synchronously BEFORE the
+      // manual-compaction `done` flag is flipped below. The rewriter
+      // needs the mutex released for its I/O; we drop and reacquire
+      // around the call. This ensures a test's `CompactRange` cannot
+      // return until auto-GC has completed, so follow-on assertions
+      // observe a quiesced registry.
+      if (!dedup_contexts_.empty()) {
+        mutex_.Unlock();
+        MaybeScheduleAutoUvlGc();
+        mutex_.Lock();
+      }
     }
     *made_progress = true;
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:AfterCompaction",

@@ -53,6 +53,7 @@ class Version;
 class VersionEdit;
 class VersionSet;
 class Arena;
+struct DedupContext;  // db/dedup/dedup_context.h
 
 class FlushJob {
  public:
@@ -73,7 +74,8 @@ class FlushJob {
            std::shared_ptr<const SeqnoToTimeMapping> seqno_to_time_mapping,
            const std::string& db_id = "", const std::string& db_session_id = "",
            std::string full_history_ts_low = "",
-           BlobFileCompletionCallback* blob_callback = nullptr);
+           BlobFileCompletionCallback* blob_callback = nullptr,
+           std::shared_ptr<DedupContext> dedup_context = nullptr);
 
   ~FlushJob();
 
@@ -213,6 +215,11 @@ class FlushJob {
 
   const std::string full_history_ts_low_;
   BlobFileCompletionCallback* blob_callback_;
+  // ITEM-14c: per-CF DedupKV state shared from DBImpl. Null when the CF
+  // has `dedupkv.enable=false`. When non-null, WriteLevel0Table() takes
+  // the inline dedup path (routing values through DGD → UVL) unless
+  // ITEM-15's elastic controller picks the offline branch.
+  std::shared_ptr<DedupContext> dedup_context_;
 
   // Shared copy of DB's seqno to time mapping stored in SuperVersion. The
   // ownership is shared with this FlushJob when it's created.

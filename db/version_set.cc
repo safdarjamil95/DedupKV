@@ -29,6 +29,10 @@
 #include "db/compaction/compaction.h"
 #include "db/compaction/file_pri.h"
 #include "db/dbformat.h"
+#include "db/dedup/cit.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/dgd.h"
+#include "db/dedup/uvl_file_reader.h"
 #include "db/internal_stats.h"
 #include "db/log_reader.h"
 #include "db/log_writer.h"
@@ -2605,6 +2609,41 @@ Status Version::GetBlob(const ReadOptions& read_options, const Slice& user_key,
     return Status::Corruption("Unexpected TTL/inlined blob index");
   }
 
+  // ITEM-16a: DedupKV UVL pointers take the UvlFileReader path; all
+  // other variants go through the native BlobDB source.
+  if (blob_index.IsDedupKVUvl()) {
+    // ITEM-18d: V2 entries embed the SHA1 fingerprint. When present
+    // (and non-zero — zero is the small-branch marker), consult CIT
+    // to find the record's current location. This is the indirection
+    // that lets GC (ITEM-18b) move records without breaking reads
+    // from existing SSTs that still name the old UVL.
+    uint64_t file_number = blob_index.file_number();
+    uint64_t offset = blob_index.offset();
+    uint64_t rec_size = blob_index.size();
+    if (blob_index.HasFingerprint()) {
+      const UvlFingerprint& fp = blob_index.fingerprint();
+      const UvlFingerprint zero{};
+      if (fp != zero) {
+        assert(cfd_);
+        const auto& ctx = cfd_->dedup_context();
+        if (ctx && ctx->cit) {
+          CITEntry cit_entry;
+          if (ctx->cit->Lookup(fp, &cit_entry, /*touch_lru=*/false)) {
+            // CIT is authoritative for the current location — follow
+            // its pointer. On CIT miss, keep the BlobIndex's stored
+            // location (backward-compatible with entries written
+            // before CIT eviction / cold-tier evict.)
+            file_number = cit_entry.uvl_file;
+            offset = cit_entry.offset;
+            rec_size = cit_entry.size;
+          }
+        }
+      }
+    }
+    return GetUvlValue(read_options, user_key, file_number, offset, rec_size,
+                       blob_index.compression(), value, bytes_read);
+  }
+
   const uint64_t blob_file_number = blob_index.file_number();
 
   auto blob_file_meta = storage_info_.GetBlobFileMetaData(blob_file_number);
@@ -2620,6 +2659,99 @@ Status Version::GetBlob(const ReadOptions& read_options, const Slice& user_key,
       blob_index.compression(), prefetch_buffer, value, bytes_read);
 
   return s;
+}
+
+Status Version::GetUvlValue(const ReadOptions& /*read_options*/,
+                            const Slice& /*user_key*/, uint64_t file_number,
+                            uint64_t offset, uint64_t size,
+                            CompressionType compression, PinnableSlice* value,
+                            uint64_t* bytes_read) const {
+  assert(value);
+  value->Reset();
+
+  // UVL files live under the CF's primary path (cf_paths[0]). ITEM-14c
+  // installs every UVL there.
+  assert(cfd_);
+  const auto& cf_paths = cfd_->ioptions().cf_paths;
+  if (cf_paths.empty()) {
+    return Status::Corruption("No cf_paths configured for UVL lookup");
+  }
+  const std::string path = UvlFileName(cf_paths.front().path, file_number);
+
+  FileSystem* fs = cfd_->ioptions().fs.get();
+  if (fs == nullptr) {
+    return Status::Corruption("Null FileSystem for UVL lookup");
+  }
+
+  uint64_t file_size = 0;
+  Status s = fs->GetFileSize(path, IOOptions(), &file_size, /*dbg=*/nullptr);
+  if (!s.ok()) {
+    return s;
+  }
+
+  std::unique_ptr<FSRandomAccessFile> fs_file;
+  s = fs->NewRandomAccessFile(path, FileOptions(), &fs_file, /*dbg=*/nullptr);
+  if (!s.ok()) {
+    return s;
+  }
+  std::unique_ptr<RandomAccessFileReader> reader(new RandomAccessFileReader(
+      std::move(fs_file), path, cfd_->ioptions().clock));
+
+  std::unique_ptr<UvlFileReader> uvl_reader;
+  s = UvlFileReader::Open(std::move(reader), file_size, &uvl_reader);
+  if (!s.ok()) {
+    return s;
+  }
+
+  PinnableSlice raw_value;
+  UvlCompression record_compression = UvlCompression::kRaw;
+  s = uvl_reader->GetValue(offset, size, &raw_value, &record_compression);
+  if (!s.ok()) {
+    return s;
+  }
+
+  // Cross-check BlobIndex-level compression tag against the per-record
+  // UVL compression byte — mismatches indicate a write/read codec drift.
+  const bool expect_lz4 = (compression == kLZ4Compression);
+  const bool record_lz4 = (record_compression == UvlCompression::kLz4Inline);
+  if (expect_lz4 != record_lz4) {
+    return Status::Corruption("UVL record compression tag mismatch");
+  }
+
+  // Hand the bytes to `value` via PinSlice over a heap-allocated
+  // backing string, mirroring BlobSource::PinOwnedBlob. PinSlice
+  // (unlike PinSelf) sets pinned_=true so the DB::Get std::string
+  // wrapper will copy into the user buffer, and so Version::Get's
+  // move-assign to the outer PinnableSlice preserves the backing
+  // pointer intact.
+  auto backing = std::make_unique<std::string>();
+  if (record_lz4) {
+    // DGD small-value branch compresses values < chunk_threshold; cap
+    // the decompression buffer generously (1 MiB) so the bound never
+    // truncates a real record. Raw values larger than the threshold
+    // are stored uncompressed and never hit this path.
+    constexpr size_t kMaxUncompressed = 1ULL << 20;
+    s = Lz4DecompressSlice(Slice(*raw_value.GetSelf()), kMaxUncompressed,
+                           backing.get());
+    if (!s.ok()) {
+      return s;
+    }
+  } else {
+    *backing = std::move(*raw_value.GetSelf());
+  }
+
+  std::string* raw_backing = backing.release();
+  value->PinSlice(
+      Slice(*raw_backing),
+      [](void* arg1, void* /*arg2*/) {
+        delete static_cast<std::string*>(arg1);
+      },
+      raw_backing, nullptr);
+
+  if (bytes_read) {
+    *bytes_read = size;
+  }
+  return Status::OK();
 }
 
 void Version::MultiGetBlob(

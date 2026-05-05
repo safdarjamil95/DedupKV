@@ -583,6 +583,31 @@ enum Tickers : uint32_t {
   // # of prefetch requests that were blocked waiting for memory
   PREFETCH_MEMORY_REQUESTS_BLOCKED,
 
+  // ITEM-20: DedupKV tickers. All zero unless at least one CF has
+  // `dedupkv.enable=true`. Counters live in the public stats; the per-CF
+  // DGDStats / UvlGarbageMeter accumulators are still maintained for
+  // tests and CF-scoped observability.
+  // # of KVs processed by the inline FLUSH-time dedup path.
+  DEDUPKV_INLINE_OPS,
+  // # of KVs processed by the offline (DWQ-driven) dedup path.
+  DEDUPKV_OFFLINE_OPS,
+  // # of large-branch values that hit an existing CIT entry.
+  DEDUPKV_DUPLICATE_HITS,
+  // # of large-branch values that missed and appended a new UVL record.
+  DEDUPKV_DUPLICATE_MISSES,
+  // # of bytes appended to UVL files (record-on-disk size, including
+  // header + key + payload).
+  DEDUPKV_UVL_BYTES_WRITTEN,
+  // # of bytes rewritten by the UVL GC rewriter (live records copied
+  // from an old UVL into a freshly-allocated one).
+  DEDUPKV_UVL_GC_BYTES_REWRITTEN,
+  // # of bytes orphaned in a UVL because a concurrent writer won the
+  // CIT race. GC eventually reclaims these.
+  DEDUPKV_UVL_ORPHANED_BYTES,
+  // # of DWQ Bloom-filter probes during Get redirection that returned
+  // a positive (potential-match) signal. Subset of Get attempts.
+  DEDUPKV_DWQ_BF_HITS,
+
   TICKER_ENUM_MAX
 };
 
@@ -734,6 +759,20 @@ enum Histograms : uint32_t {
   // (e.g., CV of 0.4532 is recorded as 4532). Currently only used by index
   // blocks for uniform key distribution tracking.
   BLOCK_KEY_DISTRIBUTION_CV,
+
+  // ITEM-20: DedupKV histograms. Populated only when dedup is enabled.
+  // Time spent LZ4-compressing a small-branch value.
+  DEDUPKV_LZ4_COMPRESS_MICROS,
+  // Time spent computing SHA1 over a large-branch value.
+  DEDUPKV_SHA1_MICROS,
+  // Time spent on a single CIT lookup (Lookup or LookupOrInsert).
+  DEDUPKV_CIT_LOOKUP_MICROS,
+  // Time spent probing a single DWQEntry's Bloom filter.
+  DEDUPKV_BF_LOOKUP_MICROS,
+  // Time spent constructing a DWQEntry's Bloom filter at flush-enqueue.
+  DEDUPKV_BF_CREATE_MICROS,
+  // Time spent appending one record to a UVL file.
+  DEDUPKV_UVL_WRITE_MICROS,
 
   HISTOGRAM_ENUM_MAX
 };

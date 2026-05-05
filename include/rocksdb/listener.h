@@ -582,6 +582,38 @@ struct BackgroundJobPressure {
   bool operator==(const BackgroundJobPressure&) const = default;
 };
 
+// ITEM-20: which DedupKV background pass produced a DedupOpInfo.
+enum class DedupOperationType : uint8_t {
+  kInlineFlush = 0,   // Inline FLUSH-time dedup pass.
+  kOfflineDrain = 1,  // DWQ-driven offline dedup drain of one WAL.
+  kUvlGc = 2,         // UVL garbage collection rewrite.
+};
+
+// EXPERIMENTAL (ITEM-20). Snapshot of one DedupKV pass; passed to
+// EventListener::OnDedupOperation. All fields are zero-defaulted; the
+// `mode` field tells listeners which subset is meaningful.
+struct DedupOpInfo {
+  std::string db_name;
+  std::string cf_name;
+  uint32_t cf_id = 0;
+  DedupOperationType mode = DedupOperationType::kInlineFlush;
+  // Background job id (flush/compaction job id, or 0 for offline/GC).
+  int job_id = 0;
+  // # of KVs processed in this pass. For kUvlGc, # of records inspected.
+  uint64_t keys_processed = 0;
+  // # of large-branch CIT hits within this pass.
+  uint64_t dedup_hits = 0;
+  // # of large-branch CIT misses within this pass.
+  uint64_t dedup_misses = 0;
+  // Bytes appended to the UVL during this pass (record-on-disk size).
+  // For kUvlGc, bytes rewritten into the new UVL.
+  uint64_t uvl_bytes_appended = 0;
+  // Newly-installed UVL file number (0 if no UVL was created).
+  uint64_t uvl_file_number = 0;
+  // Final status of the pass.
+  Status status;
+};
+
 // EventListener class contains a set of callback functions that will
 // be called when specific RocksDB event happens such as flush.  It can
 // be used as a building block for developing custom features such as
@@ -908,6 +940,15 @@ class EventListener : public Customizable {
   // returning, as this blocks RocksDB background work.
   virtual void OnBackgroundJobPressureChanged(
       DB* /*db*/, const BackgroundJobPressure& /*pressure*/) {}
+
+  // EXPERIMENTAL (ITEM-20)
+  // Fired once per DedupKV inline-flush, offline-drain, or UVL-GC pass on
+  // a column family with `dedupkv.enable=true`. Invoked on the background
+  // thread that completed the operation, without holding db_mutex_. Listener
+  // implementations must not run for an extended period — they block
+  // dedup background work. Default no-op so existing listeners continue
+  // to compile.
+  virtual void OnDedupOperation(DB* /*db*/, const DedupOpInfo& /*info*/) {}
 
   ~EventListener() override {}
 };

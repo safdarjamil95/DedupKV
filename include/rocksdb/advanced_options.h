@@ -201,6 +201,66 @@ enum class PrepopulateBlobCache : uint8_t {
   kFlushOnly = 0x1,  // Prepopulate blobs during flush only
 };
 
+// DedupKV elastic-execution mode (plan.md ITEM-11 / §4.5 of the
+// manuscript).
+//   kInlineOnly  — every FLUSH runs inline dedup. Used for the DKV(In)
+//                  ablation; regresses under high memory pressure.
+//   kOfflineOnly — every FLUSH hands off to the offline path. Used for
+//                  the DKV(Off) ablation; baseline offline dedup.
+//   kElastic     — default. FLUSH picks inline vs. offline each time
+//                  based on memtable utilization.
+enum class DedupMode : uint8_t {
+  kInlineOnly = 0,
+  kOfflineOnly = 1,
+  kElastic = 2,
+};
+
+// Tunables for DedupKV. Owned by AdvancedColumnFamilyOptions::dedupkv
+// (below); mutable fields (thresholds, chunk size, cit_checkpoint
+// cadence) are routed through MutableCFOptions. Per AMBIGUITY-009..011.
+struct DedupKVOptions {
+  // Master switch. When false, all other DedupKV fields are inert and
+  // the CF behaves like a baseline BlobDB CF.
+  // Immutable at CF level.
+  bool enable = false;
+
+  // Which of the three Fig 6 ablations to run.
+  // Immutable at CF level.
+  DedupMode mode = DedupMode::kElastic;
+
+  // Memtable-utilization threshold at or above which the elastic
+  // controller switches FLUSH to the offline path. Range [0.0, 1.0].
+  // Dynamically changeable.
+  double memory_threshold_pct = 0.80;
+
+  // Value-size threshold that picks the DGD branch (AMBIGUITY-001):
+  // values >= threshold go the SHA1-dedup path, smaller values go the
+  // LZ4-inline path. Paper sweeps {64, 128, 256, 512}; 64 maximises
+  // dedup effectiveness.
+  // Dynamically changeable.
+  uint32_t chunk_threshold_bytes = 64;
+
+  // UVL invalid-byte ratio at which GC rewrites live records into a
+  // fresh file (AMBIGUITY-010).
+  // Dynamically changeable.
+  double uvl_gc_threshold = 0.5;
+
+  // Route CIT evictions to the cold-tier persistent store. When false
+  // (default, and the paper-eval configuration per AMBIGUITY-008),
+  // evicted CIT entries are dropped.
+  // Immutable at CF level.
+  bool cold_tier_enabled = false;
+
+  // Per-N-flushes CIT checkpoint cadence (AMBIGUITY-009). Default 1
+  // (checkpoint every flush).
+  // Dynamically changeable.
+  uint32_t cit_checkpoint_every_flushes = 1;
+
+  // Defaulted equality: MutableCFOptions::operator== is also
+  // defaulted and needs its nested types to be comparable.
+  bool operator==(const DedupKVOptions& rhs) const = default;
+};
+
 // Bitmask enum for verify output flags during compaction.
 // This allows fine-grained control over what verification is performed
 // on compaction output files and when it's enabled.
@@ -1316,6 +1376,16 @@ struct AdvancedColumnFamilyOptions {
   // Default: false
   // Immutable.
   bool memtable_batch_lookup_optimization = false;
+
+  // DedupKV configuration (plan.md ITEM-11). Default-constructed to
+  // `enable=false`; existing CFs are byte-for-byte unchanged.
+  //
+  // Mutable sub-fields (memory_threshold_pct, chunk_threshold_bytes,
+  // uvl_gc_threshold, cit_checkpoint_every_flushes) are routed through
+  // MutableCFOptions and can be changed via SetOptions(). Immutable
+  // sub-fields (enable, mode, cold_tier_enabled) are frozen at CF
+  // open.
+  DedupKVOptions dedupkv;
 
   // Create ColumnFamilyOptions with default values for all fields
   AdvancedColumnFamilyOptions();

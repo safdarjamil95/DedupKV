@@ -102,3 +102,12 @@ cmake-build-*
 third-party/folly/
 .cache
 *.sublime-*
+
+# DedupKV local/private research artifacts
+.claude/
+.dedupkv_extracted.txt
+ICS_25__DedupKV.pdf
+next_session_prompt.md
+plan.md
+dedupkv_extension_pitch/
+java/jmh/target/

@@ -16,6 +16,12 @@
 #include "db/builder.h"
 #include "db/db_iter.h"
 #include "db/dbformat.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/dedup_flush_adapter.h"
+#include "db/dedup/dedup_offline_enqueue.h"
+#include "db/dedup/dedup_work_queue.h"
+#include "db/dedup/memory_monitor.h"
+#include "db/dedup/uvl_file_builder.h"
 #include "db/event_helpers.h"
 #include "db/log_reader.h"
 #include "db/log_writer.h"
@@ -27,6 +33,8 @@
 #include "db/version_set.h"
 #include "file/file_util.h"
 #include "file/filename.h"
+#include "file/read_write_util.h"
+#include "file/writable_file_writer.h"
 #include "logging/event_logger.h"
 #include "logging/log_buffer.h"
 #include "logging/logging.h"
@@ -100,7 +108,8 @@ FlushJob::FlushJob(
     Env::Priority thread_pri, const std::shared_ptr<IOTracer>& io_tracer,
     std::shared_ptr<const SeqnoToTimeMapping> seqno_to_time_mapping,
     const std::string& db_id, const std::string& db_session_id,
-    std::string full_history_ts_low, BlobFileCompletionCallback* blob_callback)
+    std::string full_history_ts_low, BlobFileCompletionCallback* blob_callback,
+    std::shared_ptr<DedupContext> dedup_context)
     : dbname_(dbname),
       db_id_(db_id),
       db_session_id_(db_session_id),
@@ -132,6 +141,7 @@ FlushJob::FlushJob(
       clock_(db_options_.clock),
       full_history_ts_low_(std::move(full_history_ts_low)),
       blob_callback_(blob_callback),
+      dedup_context_(std::move(dedup_context)),
       seqno_to_time_mapping_(std::move(seqno_to_time_mapping)) {
   assert(job_context->snapshot_context_initialized);
   // Update the thread status to indicate flush.
@@ -484,7 +494,8 @@ Status FlushJob::MemPurge() {
 
     new_mem = new MemTable(cfd_->internal_comparator(), cfd_->ioptions(),
                            mutable_cf_options_, cfd_->write_buffer_mgr(),
-                           earliest_seqno, cfd_->GetID());
+                           earliest_seqno, cfd_->GetID(),
+                           cfd_->dedup_memory_monitor());
     assert(new_mem != nullptr);
 
     Env* env = db_options_.env;
@@ -868,6 +879,11 @@ Status FlushJob::WriteLevel0Table() {
       ts_sz > 0 && !cfd_->ioptions().persist_user_defined_timestamps;
 
   std::vector<BlobFileAddition> blob_file_additions;
+  // ITEM-14c: hoisted to outer scope so the VersionEdit install code
+  // below (after the BuildTable block) can read the UVL's file number /
+  // record count, and so the failure-cleanup block can unlink the file.
+  std::unique_ptr<DedupFlushAdapter> dedup_adapter;
+  std::string uvl_file_path;
   // Note that here we treat flush as level 0 compaction in internal stats
   InternalStats::CompactionStats flush_stats(CompactionReason::kFlush,
                                              1 /* count**/);
@@ -983,6 +999,112 @@ Status FlushJob::WriteLevel0Table() {
       uint64_t memtable_garbage_bytes = 0;
       IOStatus io_s;
 
+      // ITEM-15a/b: elastic controller. Compute whether this flush
+      // should hand the IMT off to the offline worker INSTEAD OF
+      // running the inline DGD path. When true: build BF, enqueue
+      // DWQEntry, skip BuildTable entirely (ITEM-09c's WAL retention
+      // predicate keeps the IMT's WAL alive until the worker drains
+      // it). When false: fall through to the inline dedup-adapter
+      // path below.
+      bool use_offline = false;
+      if (s.ok() && dedup_context_ && dedup_context_->dwq &&
+          mutable_cf_options_.dedupkv.enable) {
+        const auto& dk = mutable_cf_options_.dedupkv;
+        if (dk.mode == DedupMode::kOfflineOnly) {
+          use_offline = true;
+        } else if (dk.mode == DedupMode::kElastic &&
+                   dedup_context_->memory_monitor) {
+          use_offline = dedup_context_->memory_monitor->Over(
+              dk.memory_threshold_pct);
+        }
+      }
+      if (use_offline) {
+        OfflineDedupFilterBuilder bf_builder(/*bits_per_key=*/10.0);
+        Arena bf_arena;
+        ReadOptions bf_ro;
+        bf_ro.total_order_seek = true;
+        bf_ro.io_activity = Env::IOActivity::kFlush;
+        for (ReadOnlyMemTable* m : mems_) {
+          InternalIterator* it =
+              logical_strip_timestamp
+                  ? m->NewTimestampStrippingIterator(
+                        bf_ro, /*seqno_to_time_mapping=*/nullptr, &bf_arena,
+                        /*prefix_extractor=*/nullptr, ts_sz)
+                  : m->NewIterator(bf_ro, /*seqno_to_time_mapping=*/nullptr,
+                                   &bf_arena, /*prefix_extractor=*/nullptr,
+                                   /*for_flush=*/true);
+          Slice prev_user_key;
+          bool have_prev = false;
+          for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            Slice user_key = ExtractUserKey(it->key());
+            if (have_prev && prev_user_key == user_key) {
+              continue;
+            }
+            bf_builder.AddKey(user_key);
+            prev_user_key = user_key;
+            have_prev = true;
+          }
+          (void)it;  // arena-allocated
+        }
+        if (bf_builder.num_keys_added() > 0) {
+          OfflineDedupFilter bf;
+          Status bf_s = bf_builder.Finish(&bf);
+          if (bf_s.ok()) {
+            // ITEM-09c stored the IMT's own WAL file number in
+            // SwitchMemtable before cur_wal_number_ advanced.
+            const uint64_t imt_wal = mems_.back()->GetLogNumber();
+            auto entry = std::make_shared<DWQEntry>(imt_wal, cfd_->GetID(),
+                                                    std::move(bf.backing),
+                                                    std::move(bf.reader));
+            dedup_context_->dwq->Push(std::move(entry));
+          } else {
+            ROCKS_LOG_WARN(db_options_.info_log,
+                           "[%s] DedupKV offline BF build failed: %s",
+                           cfd_->GetName().c_str(), bf_s.ToString().c_str());
+          }
+        }
+      }
+
+      // ITEM-14c: DedupKV inline path. Only runs when `use_offline`
+      // is false. When offline is picked, no UVL is opened here and
+      // BuildTable is skipped entirely below.
+      if (!use_offline && dedup_context_ &&
+          mutable_cf_options_.dedupkv.enable &&
+          mutable_cf_options_.dedupkv.mode != DedupMode::kOfflineOnly) {
+        assert(!cfd_->ioptions().cf_paths.empty());
+        uint64_t uvl_file_number = versions_->NewFileNumber();
+        uvl_file_path =
+            UvlFileName(cfd_->ioptions().cf_paths.front().path, uvl_file_number);
+        std::unique_ptr<FSWritableFile> uvl_fs_file;
+        FileOptions uvl_fo = file_options_;
+        uvl_fo.write_hint = write_hint;
+        IOStatus uvl_open_io = NewWritableFile(
+            db_options_.fs.get(), uvl_file_path, &uvl_fs_file, uvl_fo);
+        if (!uvl_open_io.ok()) {
+          s = uvl_open_io;
+        } else {
+          uvl_fs_file->SetIOPriority(io_priority);
+          uvl_fs_file->SetWriteLifeTimeHint(uvl_fo.write_hint);
+          std::unique_ptr<WritableFileWriter> uvl_writer(new WritableFileWriter(
+              std::move(uvl_fs_file), uvl_file_path, uvl_fo, db_options_.clock,
+              io_tracer_, db_options_.stats,
+              Histograms::BLOB_DB_BLOB_FILE_WRITE_MICROS,
+              db_options_.listeners, nullptr, false, false));
+          uint64_t creation_time = static_cast<uint64_t>(_current_time);
+          auto uvl_builder = std::make_unique<UvlFileBuilder>(
+              std::move(uvl_writer), uvl_file_number, cfd_->GetID(),
+              creation_time);
+          s = uvl_builder->Open();
+          if (s.ok()) {
+            dedup_adapter = std::make_unique<DedupFlushAdapter>(
+                dedup_context_->cit.get(), std::move(uvl_builder),
+                mutable_cf_options_.dedupkv.chunk_threshold_bytes,
+                dedup_context_->dgd_stats.get(),
+                dedup_context_->db_statistics);
+          }
+        }
+      }
+
       const std::string* const full_history_ts_low =
           (full_history_ts_low_.empty()) ? nullptr : &full_history_ts_low_;
       ReadOptions read_options(Env::IOActivity::kFlush);
@@ -1000,24 +1122,41 @@ Status FlushJob::WriteLevel0Table() {
           preclude_last_level_min_seqno_ == kMaxSequenceNumber
               ? preclude_last_level_min_seqno_
               : std::min(earliest_snapshot_, preclude_last_level_min_seqno_));
-      s = BuildTable(
-          dbname_, versions_, db_options_, tboptions, file_options_,
-          cfd_->table_cache(), iter.get(), std::move(range_del_iters), &meta_,
-          &blob_file_additions, job_context_->snapshot_seqs, earliest_snapshot_,
-          job_context_->earliest_write_conflict_snapshot,
-          job_context_->GetJobSnapshotSequence(),
-          job_context_->snapshot_checker,
-          mutable_cf_options_.paranoid_file_checks, cfd_->internal_stats(),
-          &io_s, io_tracer_, BlobFileCreationReason::kFlush,
-          seqno_to_time_mapping_.get(), event_logger_, job_context_->job_id,
-          &table_properties_, write_hint, full_history_ts_low, blob_callback_,
-          base_, &memtable_payload_bytes, &memtable_garbage_bytes,
-          &flush_stats);
+      // When the dedup adapter is active, values flow into UVL instead of
+      // a native blob file — route nullptr for blob_file_additions so
+      // BuildTable does not also spin up a BlobFileBuilder.
+      std::vector<BlobFileAddition>* const blob_additions_for_build =
+          dedup_adapter ? nullptr : &blob_file_additions;
+      // ITEM-15b: when the elastic controller picked offline, skip
+      // BuildTable entirely. The DWQEntry + WAL retention (ITEM-09c)
+      // is now the sole data path for this flush; the offline worker
+      // will emit an L0 SST via LogAndApply when it drains.
+      if (s.ok() && !use_offline) {
+        s = BuildTable(
+            dbname_, versions_, db_options_, tboptions, file_options_,
+            cfd_->table_cache(), iter.get(), std::move(range_del_iters),
+            &meta_, blob_additions_for_build, job_context_->snapshot_seqs,
+            earliest_snapshot_,
+            job_context_->earliest_write_conflict_snapshot,
+            job_context_->GetJobSnapshotSequence(),
+            job_context_->snapshot_checker,
+            mutable_cf_options_.paranoid_file_checks, cfd_->internal_stats(),
+            &io_s, io_tracer_, BlobFileCreationReason::kFlush,
+            seqno_to_time_mapping_.get(), event_logger_, job_context_->job_id,
+            &table_properties_, write_hint, full_history_ts_low, blob_callback_,
+            base_, &memtable_payload_bytes, &memtable_garbage_bytes,
+            &flush_stats, dedup_adapter.get());
+      }
       TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:s", &s);
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());
       io_s.PermitUncheckedError();
-      if (s.ok() && total_num_input_entries != flush_stats.num_input_records) {
+      // ITEM-15b: the entry-count and num_entries checks compare
+      // against flush_stats populated by BuildTable; when the offline
+      // branch skipped BuildTable these are legitimately zero — don't
+      // flag that as corruption.
+      if (s.ok() && !use_offline &&
+          total_num_input_entries != flush_stats.num_input_records) {
         std::string msg = "Expected " +
                           std::to_string(total_num_input_entries) +
                           " entries in memtables, but read " +
@@ -1031,7 +1170,7 @@ Status FlushJob::WriteLevel0Table() {
       }
 
       // Only verify on table with format collects table properties
-      if (s.ok() &&
+      if (s.ok() && !use_offline &&
           (mutable_cf_options_.table_factory->IsInstanceOf(
                TableFactory::kBlockBasedTableName()) ||
            mutable_cf_options_.table_factory->IsInstanceOf(
@@ -1105,6 +1244,60 @@ Status FlushJob::WriteLevel0Table() {
                    meta_.tail_size, meta_.user_defined_timestamps_persisted,
                    meta_.min_timestamp, meta_.max_timestamp);
     edit_->SetBlobFileAdditions(std::move(blob_file_additions));
+    // ITEM-14c: install the UVL file alongside the L0 SST so the
+    // VersionEdit lands the pair atomically.
+    if (dedup_adapter && dedup_adapter->uvl_record_count() > 0) {
+      uint64_t creation_time = static_cast<uint64_t>(meta_.file_creation_time);
+      edit_->AddUvlFile(dedup_adapter->uvl_file_number(), cfd_->GetID(),
+                        dedup_adapter->uvl_record_count(),
+                        dedup_adapter->uvl_total_bytes(), creation_time);
+      // ITEM-18f: keep an in-memory size record so the post-compaction
+      // scheduler can compute invalid/total without re-reading MANIFEST.
+      if (dedup_context_) {
+        dedup_context_->RegisterUvlFile(dedup_adapter->uvl_file_number(),
+                                        dedup_adapter->uvl_total_bytes());
+      }
+      // ITEM-20: snapshot per-pass dedup deltas for the listener event.
+      // We approximate the pass's hits/misses from the UVL record count
+      // (`record_count = misses + small_lz4`; `keys_processed = uvl
+      // record count + dedup hits`). The exact split is opaque from
+      // here without extending the adapter, so we report keys_processed
+      // and uvl_bytes_appended — the most commonly-needed signals.
+      if (!db_options_.listeners.empty()) {
+        DedupOpInfo info;
+        info.db_name = dbname_;
+        info.cf_name = cfd_->GetName();
+        info.cf_id = cfd_->GetID();
+        info.mode = DedupOperationType::kInlineFlush;
+        info.job_id = job_context_->job_id;
+        info.keys_processed = table_properties_.num_entries;
+        info.dedup_hits = 0;  // not tracked at this layer; see DGDStats
+        info.dedup_misses = 0;
+        info.uvl_bytes_appended = dedup_adapter->uvl_total_bytes();
+        info.uvl_file_number = dedup_adapter->uvl_file_number();
+        info.status = s;
+        for (const auto& listener : db_options_.listeners) {
+          if (listener) {
+            listener->OnDedupOperation(/*db=*/nullptr, info);
+          }
+        }
+      }
+    }
+  }
+  // ITEM-14c: clean up the UVL file whenever we're not installing it.
+  // BuildTable has already Abandoned the writer on failure/empty; all we
+  // need here is to unlink the on-disk file. On success with records
+  // installed above, the file lives on until ITEM-18 UVL GC collects it.
+  if (dedup_adapter &&
+      (!s.ok() || !has_output || dedup_adapter->uvl_record_count() == 0)) {
+    IOOptions uvl_io_opts;
+    Status prep = WritableFileWriter::PrepareIOOptions(
+        WriteOptions(Env::IO_LOW, Env::IOActivity::kFlush), uvl_io_opts);
+    if (prep.ok()) {
+      Status ignored = db_options_.fs->DeleteFile(uvl_file_path, uvl_io_opts,
+                                                  /*dbg=*/nullptr);
+      ignored.PermitUncheckedError();
+    }
   }
   // Piggyback FlushJobInfo on the first first flushed memtable.
   mems_[0]->SetFlushJobInfo(GetFlushJobInfo());

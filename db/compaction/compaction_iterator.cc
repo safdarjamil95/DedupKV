@@ -12,6 +12,16 @@
 #include "db/blob/blob_file_builder.h"
 #include "db/blob/blob_index.h"
 #include "db/blob/prefetch_buffer_collection.h"
+#include "db/column_family.h"
+#include "db/compaction/compaction.h"
+#include "db/dedup/cit.h"
+#include "db/dedup/dedup_context.h"
+#include "db/dedup/uvl_file_reader.h"
+#include "db/dedup/uvl_garbage_meter.h"
+#include "db/dedup/uvl_log_format.h"
+#include "file/filename.h"
+#include "file/random_access_file_reader.h"
+#include "rocksdb/file_system.h"
 #include "db/snapshot_checker.h"
 #include "db/wide/wide_column_serialization.h"
 #include "db/wide/wide_columns_helper.h"
@@ -724,6 +734,10 @@ void CompactionIterator::NextFromInput() {
         if (last_key_seq_zeroed_) {
           // Drop SD and the next key since they are both in the last
           // snapshot (since last key has seqno zeroed).
+          // ITEM-17b: the next key is the PUT being dropped alongside
+          // the SingleDelete; release its CIT ref if it's a dedup
+          // BlobIndex. input_ still points at the PUT here.
+          MaybeDecrementDedupRefImpl(next_ikey, input_.value());
           ++iter_stats_.num_record_drop_hidden;
           ++iter_stats_.num_record_drop_obsolete;
           assert(bottommost_level_);
@@ -795,6 +809,9 @@ void CompactionIterator::NextFromInput() {
               ++iter_stats_.num_single_del_mismatch;
             }
 
+            // ITEM-17b: SD matched a PUT; both will be dropped. The
+            // PUT is at input_ (we already advanced past the SD).
+            MaybeDecrementDedupRefImpl(next_ikey, input_.value());
             ++iter_stats_.num_record_drop_hidden;
             ++iter_stats_.num_record_drop_obsolete;
             // Already called input_.Next() once.  Call it a second time to
@@ -893,6 +910,10 @@ void CompactionIterator::NextFromInput() {
         assert(false);
       }
 
+      // ITEM-17: rule-A drop — this entry is superseded by a newer
+      // version of the same user-key. If it referenced a dedup UVL
+      // record, let the CIT know by decrementing refcount.
+      MaybeDecrementDedupRefForDroppedKey();
       ++iter_stats_.num_record_drop_hidden;
       AdvanceInputIter();
     } else if (compaction_ != nullptr &&
@@ -966,6 +987,13 @@ void CompactionIterator::NextFromInput() {
              cmp_->EqualWithoutTimestamp(ikey_.user_key, next_ikey.user_key) &&
              (prev_snapshot == 0 || input_.IsDeleteRangeSentinelKey() ||
               DefinitelyNotInSnapshot(next_ikey.sequence, prev_snapshot))) {
+        // ITEM-17b: bottommost-delete drop loop. Each iteration
+        // discards a prior version of the deleted user_key; if any
+        // of them is a dedup BlobIndex, release its CIT ref before
+        // advancing past it.
+        if (!input_.IsDeleteRangeSentinelKey()) {
+          MaybeDecrementDedupRefImpl(next_ikey, input_.value());
+        }
         AdvanceInputIter();
       }
       // If you find you still need to output a row with this key, we need to
@@ -1107,6 +1135,9 @@ void CompactionIterator::NextFromInput() {
             key_, RangeDelPositioningMode::kForwardTraversal);
       }
       if (should_delete) {
+        // ITEM-17b: range-del is covering the current key; if it's
+        // a dedup BlobIndex, release the CIT ref.
+        MaybeDecrementDedupRefForDroppedKey();
         ++iter_stats_.num_record_drop_hidden;
         ++iter_stats_.num_record_drop_range_del;
         AdvanceInputIter();
@@ -1165,6 +1196,101 @@ void CompactionIterator::ExtractLargeValueIfNeeded() {
 
   ikey_.type = kTypeBlobIndex;
   current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
+}
+
+void CompactionIterator::MaybeDecrementDedupRefForDroppedKey() {
+  MaybeDecrementDedupRefImpl(ikey_, value_);
+}
+
+void CompactionIterator::MaybeDecrementDedupRefImpl(
+    const ParsedInternalKey& ikey, const Slice& value) {
+  // Fast path: not a BlobIndex at all → nothing to do.
+  if (ikey.type != kTypeBlobIndex) {
+    return;
+  }
+  if (compaction_ == nullptr) {
+    return;
+  }
+  const Compaction* real = compaction_->real_compaction();
+  if (real == nullptr) {
+    return;
+  }
+  ColumnFamilyData* cfd = real->column_family_data();
+  if (cfd == nullptr) {
+    return;
+  }
+  const auto& ctx = cfd->dedup_context();
+  if (!ctx || !ctx->cit) {
+    return;  // dedup not enabled
+  }
+
+  BlobIndex bi;
+  Status s = bi.DecodeFrom(value);
+  if (!s.ok() || !bi.IsDedupKVUvl()) {
+    return;
+  }
+
+  // ITEM-18d: V2 BlobIndex (ITEM-18c) embeds the 20-byte fingerprint.
+  // When present, use it directly and skip the UVL file-open entirely
+  // — this is both the correctness prerequisite for deleting old UVL
+  // files (ITEM-18e) and the latency win §5.4 of the manuscript calls
+  // out for DKV(In).
+  //
+  // V1 entries (written before ITEM-18c landed) have no embedded fp;
+  // fall back to the open-UVL-and-read-header path.
+  UvlFingerprint fp{};
+  if (bi.HasFingerprint()) {
+    fp = bi.fingerprint();
+    // Small-branch records carry an all-zero fp marker and aren't
+    // CIT-tracked — DecRefcount would miss. Skip.
+    const UvlFingerprint zero{};
+    if (fp == zero) {
+      return;
+    }
+  } else {
+    // V1 fallback — open the UVL file by number and read the 20-byte
+    // fingerprint at the record offset.
+    assert(!cfd->ioptions().cf_paths.empty());
+    const std::string uvl_path =
+        UvlFileName(cfd->ioptions().cf_paths.front().path, bi.file_number());
+    FileSystem* fs = cfd->ioptions().fs.get();
+    if (fs == nullptr) return;
+    uint64_t file_size = 0;
+    if (!fs->GetFileSize(uvl_path, IOOptions(), &file_size, nullptr).ok()) {
+      return;
+    }
+    std::unique_ptr<FSRandomAccessFile> fs_file;
+    if (!fs->NewRandomAccessFile(uvl_path, FileOptions(), &fs_file, nullptr)
+             .ok()) {
+      return;
+    }
+    std::unique_ptr<RandomAccessFileReader> reader(new RandomAccessFileReader(
+        std::move(fs_file), uvl_path, cfd->ioptions().clock));
+    std::unique_ptr<UvlFileReader> uvl_reader;
+    if (!UvlFileReader::Open(std::move(reader), file_size, &uvl_reader).ok()) {
+      return;
+    }
+    if (!uvl_reader->GetFingerprint(bi.offset(), &fp).ok()) {
+      return;
+    }
+  }
+  const uint32_t new_refcount = ctx->cit->DecRefcount(fp);
+  // ITEM-18a: when the refcount hits zero, the UVL record is orphaned
+  // — charge its on-disk footprint to the per-file invalid-byte
+  // accumulator. The BlobIndex records the record's logical value
+  // size; we approximate the full record footprint by
+  // (value_size + kUvlRecordOverheadBytes). Precise byte-for-byte
+  // accounting would require decoding the record's varint headers,
+  // which is an over-optimisation for GC scheduling decisions.
+  if (new_refcount == 0 && ctx->uvl_garbage_meter) {
+    constexpr uint64_t kUvlRecordOverheadBytes =
+        kUvlFingerprintSize + /*compression byte=*/1 +
+        /*ksz varint, worst case=*/5 + /*vsz varint, worst case=*/5 +
+        /*crc32c=*/4;
+    const uint64_t charge =
+        static_cast<uint64_t>(bi.size()) + kUvlRecordOverheadBytes;
+    ctx->uvl_garbage_meter->Accumulate(bi.file_number(), charge);
+  }
 }
 
 void CompactionIterator::GarbageCollectBlobIfNeeded() {

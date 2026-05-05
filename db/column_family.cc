@@ -23,6 +23,7 @@
 #include "db/compaction/compaction_picker_level.h"
 #include "db/compaction/compaction_picker_universal.h"
 #include "db/db_impl/db_impl.h"
+#include "db/dedup/memory_monitor.h"
 #include "db/internal_stats.h"
 #include "db/job_context.h"
 #include "db/range_del_aggregator.h"
@@ -229,6 +230,18 @@ ColumnFamilyOptions SanitizeCfOptions(const ImmutableDBOptions& db_options,
                                       bool read_only,
                                       const ColumnFamilyOptions& src) {
   ColumnFamilyOptions result = src;
+
+  // ITEM-13: DedupKV manages UVL files itself (ITEM-18 UVL GC); force
+  // BlobDB's native blob GC off so the two schedulers don't race.
+  // Logged once per CF so users see the override.
+  if (result.dedupkv.enable && result.enable_blob_garbage_collection) {
+    ROCKS_LOG_INFO(
+        db_options.logger,
+        "DedupKV: forcing enable_blob_garbage_collection=false; UVL GC "
+        "(ITEM-18) replaces native blob GC when dedupkv.enable=true.");
+    result.enable_blob_garbage_collection = false;
+  }
+
   size_t clamp_max = std::conditional<
       sizeof(size_t) == 4, std::integral_constant<size_t, 0xffffffff>,
       std::integral_constant<uint64_t, 64ull << 30>>::type::value;
@@ -1227,7 +1240,19 @@ uint64_t ColumnFamilyData::GetLiveSstFilesSize() const {
 MemTable* ColumnFamilyData::ConstructNewMemtable(
     const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
   return new MemTable(internal_comparator_, ioptions_, mutable_cf_options,
-                      write_buffer_manager_, earliest_seq, id_);
+                      write_buffer_manager_, earliest_seq, id_,
+                      dedup_memory_monitor_);
+}
+
+void ColumnFamilyData::SetDedupMemoryMonitor(
+    std::shared_ptr<DedupMemoryMonitor> monitor) {
+  dedup_memory_monitor_ = monitor;
+  // Cascade to the current active MT so writes after this point are
+  // accounted. Safe without holding a MemTable lock: ITEM-15c's
+  // contract is that this is invoked at DB::Open before any writer.
+  if (mem_ != nullptr) {
+    mem_->SetDedupMemoryMonitor(std::move(monitor));
+  }
 }
 
 void ColumnFamilyData::CreateNewMemtable(SequenceNumber earliest_seq) {
