@@ -16,28 +16,37 @@ namespace ROCKSDB_NAMESPACE {
 
 #ifndef NROCKSDB_THREAD_STATUS
 
-thread_local ThreadStatusData* ThreadStatusUpdater::thread_status_data_ =
-    nullptr;
+namespace {
+
+void UnrefThreadStatusData(void* ptr) {
+  delete static_cast<ThreadStatusData*>(ptr);
+}
+
+}  // namespace
+
+ThreadLocalPtr ThreadStatusUpdater::thread_status_data_(&UnrefThreadStatusData);
 
 void ThreadStatusUpdater::RegisterThread(ThreadStatus::ThreadType ttype,
                                          uint64_t thread_id) {
-  if (UNLIKELY(thread_status_data_ == nullptr)) {
-    thread_status_data_ = new ThreadStatusData();
-    thread_status_data_->thread_type = ttype;
-    thread_status_data_->thread_id = thread_id;
+  auto* data = Get();
+  if (UNLIKELY(data == nullptr)) {
+    data = new ThreadStatusData();
+    thread_status_data_.Reset(data);
+    data->thread_type = ttype;
+    data->thread_id = thread_id;
     std::lock_guard<std::mutex> lck(thread_list_mutex_);
-    thread_data_set_.insert(thread_status_data_);
+    thread_data_set_.insert(data);
   }
 
   ClearThreadOperationProperties();
 }
 
 void ThreadStatusUpdater::UnregisterThread() {
-  if (thread_status_data_ != nullptr) {
+  auto* data = Get();
+  if (data != nullptr) {
     std::lock_guard<std::mutex> lck(thread_list_mutex_);
-    thread_data_set_.erase(thread_status_data_);
-    delete thread_status_data_;
-    thread_status_data_ = nullptr;
+    thread_data_set_.erase(data);
+    thread_status_data_.Reset(nullptr);
   }
 }
 
@@ -220,13 +229,14 @@ Status ThreadStatusUpdater::GetThreadList(
 }
 
 ThreadStatusData* ThreadStatusUpdater::GetLocalThreadStatus() {
-  if (thread_status_data_ == nullptr) {
+  auto* data = Get();
+  if (data == nullptr) {
     return nullptr;
   }
-  if (!thread_status_data_->enable_tracking.load(std::memory_order_relaxed)) {
+  if (!data->enable_tracking.load(std::memory_order_relaxed)) {
     return nullptr;
   }
-  return thread_status_data_;
+  return data;
 }
 
 void ThreadStatusUpdater::NewColumnFamilyInfo(const void* db_key,

@@ -12,112 +12,139 @@
 namespace ROCKSDB_NAMESPACE {
 
 #ifndef NROCKSDB_THREAD_STATUS
-thread_local ThreadStatusUpdater*
-    ThreadStatusUtil::thread_updater_local_cache_ = nullptr;
-thread_local bool ThreadStatusUtil::thread_updater_initialized_ = false;
+ThreadLocalPtr ThreadStatusUtil::thread_updater_local_cache_;
+ThreadLocalPtr ThreadStatusUtil::thread_updater_initialized_;
+
+bool ThreadStatusUtil::IsThreadUpdaterInitialized() {
+  return thread_updater_initialized_.Get() != nullptr;
+}
+
+void ThreadStatusUtil::SetThreadUpdaterInitialized(bool initialized) {
+  thread_updater_initialized_.Reset(initialized ? reinterpret_cast<void*>(1)
+                                                : nullptr);
+}
+
+ThreadStatusUpdater* ThreadStatusUtil::GetThreadUpdaterLocalCache() {
+  return static_cast<ThreadStatusUpdater*>(thread_updater_local_cache_.Get());
+}
+
+void ThreadStatusUtil::SetThreadUpdaterLocalCache(ThreadStatusUpdater* updater) {
+  thread_updater_local_cache_.Reset(updater);
+}
 
 void ThreadStatusUtil::RegisterThread(const Env* env,
                                       ThreadStatus::ThreadType thread_type) {
   if (!MaybeInitThreadLocalUpdater(env)) {
     return;
   }
-  assert(thread_updater_local_cache_);
-  thread_updater_local_cache_->RegisterThread(thread_type, env->GetThreadID());
+  auto* updater = GetThreadUpdaterLocalCache();
+  assert(updater);
+  updater->RegisterThread(thread_type, env->GetThreadID());
 }
 
 void ThreadStatusUtil::UnregisterThread() {
-  thread_updater_initialized_ = false;
-  if (thread_updater_local_cache_ != nullptr) {
-    thread_updater_local_cache_->UnregisterThread();
-    thread_updater_local_cache_ = nullptr;
+  SetThreadUpdaterInitialized(false);
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater != nullptr) {
+    updater->UnregisterThread();
+    SetThreadUpdaterLocalCache(nullptr);
   }
 }
 
 void ThreadStatusUtil::SetEnableTracking(bool enable_tracking) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     return;
   }
-  thread_updater_local_cache_->SetEnableTracking(enable_tracking);
+  updater->SetEnableTracking(enable_tracking);
 }
 
 void ThreadStatusUtil::SetColumnFamily(const ColumnFamilyData* cfd) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     return;
   }
   assert(cfd);
-  thread_updater_local_cache_->SetColumnFamilyInfoKey(cfd);
+  updater->SetColumnFamilyInfoKey(cfd);
 }
 
 void ThreadStatusUtil::SetThreadOperation(ThreadStatus::OperationType op) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     return;
   }
 
   if (op != ThreadStatus::OP_UNKNOWN) {
     uint64_t current_time = SystemClock::Default()->NowMicros();
-    thread_updater_local_cache_->SetOperationStartTime(current_time);
+    updater->SetOperationStartTime(current_time);
   } else {
     // TDOO(yhchiang): we could report the time when we set operation to
     // OP_UNKNOWN once the whole instrumentation has been done.
-    thread_updater_local_cache_->SetOperationStartTime(0);
+    updater->SetOperationStartTime(0);
   }
-  thread_updater_local_cache_->SetThreadOperation(op);
+  updater->SetThreadOperation(op);
 }
 
 ThreadStatus::OperationType ThreadStatusUtil::GetThreadOperation() {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     return ThreadStatus::OperationType::OP_UNKNOWN;
   }
-  return thread_updater_local_cache_->GetThreadOperation();
+  return updater->GetThreadOperation();
 }
 
 ThreadStatus::OperationStage ThreadStatusUtil::SetThreadOperationStage(
     ThreadStatus::OperationStage stage) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     // thread_updater_local_cache_ must be set in SetColumnFamily
     // or other ThreadStatusUtil functions.
     return ThreadStatus::STAGE_UNKNOWN;
   }
 
-  return thread_updater_local_cache_->SetThreadOperationStage(stage);
+  return updater->SetThreadOperationStage(stage);
 }
 
 void ThreadStatusUtil::SetThreadOperationProperty(int code, uint64_t value) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     // thread_updater_local_cache_ must be set in SetColumnFamily
     // or other ThreadStatusUtil functions.
     return;
   }
 
-  thread_updater_local_cache_->SetThreadOperationProperty(code, value);
+  updater->SetThreadOperationProperty(code, value);
 }
 
 void ThreadStatusUtil::IncreaseThreadOperationProperty(int code,
                                                        uint64_t delta) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     // thread_updater_local_cache_ must be set in SetColumnFamily
     // or other ThreadStatusUtil functions.
     return;
   }
 
-  thread_updater_local_cache_->IncreaseThreadOperationProperty(code, delta);
+  updater->IncreaseThreadOperationProperty(code, delta);
 }
 
 void ThreadStatusUtil::SetThreadState(ThreadStatus::StateType state) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     // thread_updater_local_cache_ must be set in SetColumnFamily
     // or other ThreadStatusUtil functions.
     return;
   }
 
-  thread_updater_local_cache_->SetThreadState(state);
+  updater->SetThreadState(state);
 }
 
 void ThreadStatusUtil::ResetThreadStatus() {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     return;
   }
-  thread_updater_local_cache_->ResetThreadStatus();
+  updater->ResetThreadStatus();
 }
 
 void ThreadStatusUtil::NewColumnFamilyInfo(const DB* db,
@@ -127,18 +154,19 @@ void ThreadStatusUtil::NewColumnFamilyInfo(const DB* db,
   if (!MaybeInitThreadLocalUpdater(env)) {
     return;
   }
-  assert(thread_updater_local_cache_);
-  if (thread_updater_local_cache_) {
-    thread_updater_local_cache_->NewColumnFamilyInfo(db, db->GetName(), cfd,
-                                                     cf_name);
+  auto* updater = GetThreadUpdaterLocalCache();
+  assert(updater);
+  if (updater) {
+    updater->NewColumnFamilyInfo(db, db->GetName(), cfd, cf_name);
   }
 }
 
 void ThreadStatusUtil::EraseColumnFamilyInfo(const ColumnFamilyData* cfd) {
-  if (thread_updater_local_cache_ == nullptr) {
+  auto* updater = GetThreadUpdaterLocalCache();
+  if (updater == nullptr) {
     return;
   }
-  thread_updater_local_cache_->EraseColumnFamilyInfo(cfd);
+  updater->EraseColumnFamilyInfo(cfd);
 }
 
 void ThreadStatusUtil::EraseDatabaseInfo(const DB* db) {
@@ -150,11 +178,11 @@ void ThreadStatusUtil::EraseDatabaseInfo(const DB* db) {
 }
 
 bool ThreadStatusUtil::MaybeInitThreadLocalUpdater(const Env* env) {
-  if (!thread_updater_initialized_ && env != nullptr) {
-    thread_updater_initialized_ = true;
-    thread_updater_local_cache_ = env->GetThreadStatusUpdater();
+  if (!IsThreadUpdaterInitialized() && env != nullptr) {
+    SetThreadUpdaterInitialized(true);
+    SetThreadUpdaterLocalCache(env->GetThreadStatusUpdater());
   }
-  return (thread_updater_local_cache_ != nullptr);
+  return (GetThreadUpdaterLocalCache() != nullptr);
 }
 
 AutoThreadOperationStageUpdater::AutoThreadOperationStageUpdater(
